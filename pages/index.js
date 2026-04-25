@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/router';
 import Head from 'next/head';
 import Link from 'next/link';
-import { getWatchedIds, toggleFavorite, isFavorite, addWatched } from '../lib/storage';
+import { getWatchedIds, toggleFavorite, isFavorite, addWatched, savePlaylist } from '../lib/storage';
 
 // ─── 硬編碼 API 憑證（直接寫入，無需登入時手動輸入）─────────────────────────
 const HARDCODED_API_ID = '39092753';
@@ -601,6 +601,7 @@ export default function Home() {
   function handlePlay(video) {
     addWatched(video);
     setWatchedIds((prev) => new Set([...prev, video.id]));
+    savePlaylist(filteredVideos);
     const p = new URLSearchParams({
       chatId: video.chatId, msgId: video.msgId,
       accessHash: video.accessHash || '', chatType: video.chatType || '',
