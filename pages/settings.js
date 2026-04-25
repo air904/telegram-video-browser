@@ -60,9 +60,14 @@ export default function SettingsPage() {
   const searchRef = useRef(null);
 
   useEffect(() => {
-    setGroups(getKnownGroups());
+    const known = getKnownGroups();
+    setGroups(known);
     setSelectedIds(getSelectedGroupIds());
-  }, []);
+    // 第一次進入設定頁且尚無群組資料 → 自動蒐集
+    if (known.length === 0) {
+      collectGroups();
+    }
+  }, []); // eslint-disable-line
 
   function flashSaved() {
     setSaved(true);
@@ -78,7 +83,9 @@ export default function SettingsPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
 
-      const existingMap = new Map(groups.map(g => [g.chatId, g]));
+      // 讀取最新 state（auto-collect 時 groups state 可能還是空的）
+      const currentGroups = getKnownGroups();
+      const existingMap   = new Map(currentGroups.map(g => [g.chatId, g]));
       const merged = data.groups.map(g => ({
         ...g,
         count: existingMap.get(g.chatId)?.count ?? 0,
@@ -208,7 +215,12 @@ export default function SettingsPage() {
               transition: 'all 0.15s',
             }}
           >
-            {collecting ? <><Spinner size={14} /> 蒐集中，請稍候…</> : <>🔍 蒐集帳號下所有群組</>}
+            {collecting
+            ? <><Spinner size={14}/> 蒐集中，請稍候…</>
+            : groups.length === 0
+              ? <>🔍 蒐集帳號下所有群組</>
+              : <>🔄 重新蒐集群組（共 {groups.length} 個）</>
+          }
           </button>
 
           {/* Error */}
