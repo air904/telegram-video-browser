@@ -1,110 +1,92 @@
 /**
  * GET /api/stream?chatId=&msgId=&accessHash=&chatType=&mimeType=&accountId=
  *
- * Streams a Telegram video to the browser with HTTP range request support.
+ * 直接從 Telegram 串流影片到瀏覽器，不需要預先下載。
+ * 支援 HTTP Range Request（讓 <video> 可拖拉進度條）。
  *
- * Flow:
- *  1. Download the video to /tmp (cached per serverless instance).
- *  2. Serve from /tmp with proper Content-Range so <video> seeking works.
- *
- * Note: First play of a video requires a full download — a progress event
- * stream is sent via /api/stream-progress for the UI loading indicator.
+ * - 無 Range header → 串流完整影片（PassThrough pipe）
+ * - 有 Range header → 用 downloadMedia(start, end) 取得指定片段
  */
-import {
-  getActiveAccount,
-  getTelegramClient,
-  buildInputPeer,
-} from '../../lib/telegram';
-import fs from 'fs';
-import path from 'path';
+import { getActiveAccount, getTelegramClient, buildInputPeer } from '../../lib/telegram';
+import { PassThrough } from 'stream';
 
 export const config = { api: { responseLimit: false } };
-
-// Track in-progress downloads: cacheKey → Promise
-const inFlight = new Map();
-
-// Export progress map so /api/stream-progress can read it
-export const downloadProgress = new Map(); // cacheKey → { pct, done, error }
 
 export default async function handler(req, res) {
   const { chatId, msgId, accessHash, chatType, mimeType = 'video/mp4', accountId } = req.query;
   const account = getActiveAccount(req, accountId);
-  if (!account) return res.status(401).send('Not authenticated');
+  if (!account) return res.status(401).end('Not authenticated');
 
-  const cacheKey = `${account.id}_${chatId}_${msgId}`;
-  const ext = (mimeType.split('/')[1] || 'mp4').replace('x-matroska', 'mkv');
-  const tmpPath = `/tmp/${cacheKey}.${ext}`;
+  try {
+    const client = await getTelegramClient(account);
+    const peer = buildInputPeer(chatId, accessHash, chatType);
 
-  // Ensure file is downloaded
-  if (!fs.existsSync(tmpPath)) {
-    if (!inFlight.has(cacheKey)) {
-      downloadProgress.set(cacheKey, { pct: 0, done: false, error: null });
+    // Get message metadata (needed for fileSize and Content-Type)
+    const msgs = await client.getMessages(peer, { ids: [parseInt(msgId)] });
+    const msg = msgs?.[0];
+    if (!msg?.media?.document) return res.status(404).end('Not found');
 
-      const promise = (async () => {
-        const client = await getTelegramClient(account);
-        const peer = buildInputPeer(chatId, accessHash, chatType);
-        const msgs = await client.getMessages(peer, { ids: [parseInt(msgId)] });
-        const msg = msgs?.[0];
-        if (!msg?.media?.document) throw new Error('Media not found');
+    const doc = msg.media.document;
+    const fileSize = Number(doc.size || 0);
+    const contentType = doc.mimeType || mimeType;
 
-        const total = Number(msg.media.document.size || 0);
+    // Disable cache to allow range requests from the browser
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Accel-Buffering', 'no');
 
+    const rangeHeader = req.headers.range;
+
+    if (rangeHeader) {
+      // ── Range request (seeking / chunked load) ──────────────────────────────
+      const [startStr, endStr] = rangeHeader.replace(/bytes=/, '').split('-');
+      const start = parseInt(startStr, 10) || 0;
+      // Default chunk: 5 MB or to end of file
+      const end = endStr ? parseInt(endStr, 10) : Math.min(start + 5 * 1024 * 1024 - 1, fileSize - 1);
+
+      res.writeHead(206, {
+        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+        'Content-Length': end - start + 1,
+        'Content-Type': contentType,
+        'Accept-Ranges': 'bytes',
+      });
+
+      // Download only the requested byte range from Telegram
+      const chunk = await client.downloadMedia(msg, {
+        start,
+        end: end + 1,   // GramJS end is exclusive
+        workers: 1,
+      });
+
+      res.end(chunk || Buffer.alloc(0));
+    } else {
+      // ── Full stream (initial play, no seek) ──────────────────────────────────
+      res.writeHead(200, {
+        'Content-Length': fileSize,
+        'Content-Type': contentType,
+        'Accept-Ranges': 'bytes',
+      });
+
+      // Pipe download directly to response — no disk I/O
+      const pass = new PassThrough();
+      pass.pipe(res);
+
+      req.on('close', () => {
+        if (!pass.destroyed) pass.destroy();
+      });
+
+      try {
         await client.downloadMedia(msg, {
-          outputFile: tmpPath,
-          progressCallback: (downloaded) => {
-            const pct = total > 0 ? Math.round((Number(downloaded) / total) * 100) : 0;
-            downloadProgress.set(cacheKey, { pct, done: false, error: null });
-          },
+          outputFile: pass,
+          workers: 4,
+          progressCallback: () => {}, // suppress console noise
         });
-
-        downloadProgress.set(cacheKey, { pct: 100, done: true, error: null });
-      })().catch((err) => {
-        downloadProgress.set(cacheKey, { pct: 0, done: false, error: err.message });
-        inFlight.delete(cacheKey);
-        throw err;
-      }).finally(() => inFlight.delete(cacheKey));
-
-      inFlight.set(cacheKey, promise);
+      } finally {
+        if (!pass.destroyed) pass.end();
+      }
     }
-
-    try {
-      await inFlight.get(cacheKey);
-    } catch (e) {
-      return res.status(500).json({ error: e.message });
-    }
-  } else {
-    // File already exists; mark progress as done
-    downloadProgress.set(cacheKey, { pct: 100, done: true, error: null });
-  }
-
-  if (!fs.existsSync(tmpPath)) {
-    return res.status(500).json({ error: 'Download failed' });
-  }
-
-  // Serve with range request support
-  const stat = fs.statSync(tmpPath);
-  const fileSize = stat.size;
-  const rangeHeader = req.headers.range;
-
-  if (rangeHeader) {
-    const [startStr, endStr] = rangeHeader.replace(/bytes=/, '').split('-');
-    const start = parseInt(startStr, 10);
-    const end = endStr ? parseInt(endStr, 10) : Math.min(start + 10 * 1024 * 1024 - 1, fileSize - 1);
-    const chunkSize = end - start + 1;
-
-    res.writeHead(206, {
-      'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-      'Accept-Ranges': 'bytes',
-      'Content-Length': chunkSize,
-      'Content-Type': mimeType,
-    });
-    fs.createReadStream(tmpPath, { start, end }).pipe(res);
-  } else {
-    res.writeHead(200, {
-      'Content-Length': fileSize,
-      'Content-Type': mimeType,
-      'Accept-Ranges': 'bytes',
-    });
-    fs.createReadStream(tmpPath).pipe(res);
+  } catch (e) {
+    if (!res.headersSent) res.status(500).json({ error: e.message });
   }
 }

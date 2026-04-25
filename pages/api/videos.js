@@ -1,5 +1,5 @@
 /**
- * GET /api/videos?search=&maxGroups=30&accountId=
+ * GET /api/videos?search=&maxGroups=30&accountId=&minDuration=10&maxDuration=180
  *
  * Server-Sent Events stream. Each event is a JSON object:
  *   { type: 'scanning', chat: '...' }
@@ -13,7 +13,9 @@ import { Api } from 'telegram';
 export const config = { api: { responseLimit: false } };
 
 export default async function handler(req, res) {
-  const { search = '', maxGroups = '30', accountId } = req.query;
+  const { search = '', maxGroups = '30', accountId, minDuration = '10', maxDuration = '180' } = req.query;
+  const minSec = parseInt(minDuration) || 0;
+  const maxSec = parseInt(maxDuration) || Infinity;
   const account = getActiveAccount(req, accountId);
   if (!account) {
     res.status(401).json({ error: 'Not authenticated' });
@@ -103,6 +105,9 @@ export default async function handler(req, res) {
           const title = msg.message?.trim() || fileName || chatTitle;
 
           // Apply search filter
+          // 時長過濾（伺服器端）
+          if (duration < minSec || duration > maxSec) continue;
+
           if (searchLower) {
             const haystack = `${title} ${chatTitle}`.toLowerCase();
             if (!haystack.includes(searchLower)) continue;

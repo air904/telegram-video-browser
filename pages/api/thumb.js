@@ -1,28 +1,23 @@
 /**
  * GET /api/thumb?chatId=&msgId=&accessHash=&chatType=&accountId=
  *
- * Downloads and returns the thumbnail of a Telegram video message.
- * Response is cached in the browser for 24 hours.
+ * 下載 Telegram 影片縮圖（自動選最高畫質）。
+ * 瀏覽器端快取 24 小時。
  */
-import {
-  getActiveAccount,
-  getTelegramClient,
-  buildInputPeer,
-} from '../../lib/telegram';
+import { getActiveAccount, getTelegramClient, buildInputPeer } from '../../lib/telegram';
 
 export const config = { api: { responseLimit: false } };
 
-// In-memory thumbnail cache (persists across warm-start requests in the same instance)
-const thumbCache = new Map(); // key → Buffer
+// In-memory cache (warm-start across requests in same instance)
+const thumbCache = new Map();
 
 export default async function handler(req, res) {
   const { chatId, msgId, accessHash, chatType, accountId } = req.query;
   const account = getActiveAccount(req, accountId);
-  if (!account) return res.status(401).json({ error: 'Not authenticated' });
+  if (!account) return res.status(401).end('Not authenticated');
 
   const cacheKey = `${account.id}_${chatId}_${msgId}`;
 
-  // Serve from in-memory cache if available
   if (thumbCache.has(cacheKey)) {
     const buf = thumbCache.get(cacheKey);
     res.setHeader('Content-Type', 'image/jpeg');
@@ -36,27 +31,29 @@ export default async function handler(req, res) {
     const msgs = await client.getMessages(peer, { ids: [parseInt(msgId)] });
     const msg = msgs?.[0];
 
-    if (!msg?.media?.document) {
-      return res.status(404).send('Media not found');
-    }
+    if (!msg?.media?.document) return res.status(404).end('Not found');
 
     const doc = msg.media.document;
-    if (!doc.thumbs || doc.thumbs.length === 0) {
-      return res.status(404).send('No thumbnail');
+    const thumbs = doc.thumbs || [];
+    if (thumbs.length === 0) return res.status(404).end('No thumbnail');
+
+    // 選最高畫質：找面積最大的 PhotoSize（排除漸進式/路徑類型）
+    let bestIdx = thumbs.length - 1;
+    let bestArea = 0;
+    for (let i = 0; i < thumbs.length; i++) {
+      const t = thumbs[i];
+      const area = (t.w || 0) * (t.h || 0);
+      if (t.className === 'PhotoSize' && area > bestArea) {
+        bestArea = area;
+        bestIdx = i;
+      }
     }
 
-    // Download smallest thumbnail
-    const thumbBuffer = await client.downloadMedia(msg, { thumb: 0 });
+    const thumbBuffer = await client.downloadMedia(msg, { thumb: bestIdx });
+    if (!thumbBuffer || thumbBuffer.length === 0) return res.status(404).end('Empty thumbnail');
 
-    if (!thumbBuffer || thumbBuffer.length === 0) {
-      return res.status(404).send('Empty thumbnail');
-    }
-
-    // Cache in memory (cap at 500 entries to prevent unbounded growth)
-    if (thumbCache.size >= 500) {
-      const firstKey = thumbCache.keys().next().value;
-      thumbCache.delete(firstKey);
-    }
+    // 最多快取 600 筆
+    if (thumbCache.size >= 600) thumbCache.delete(thumbCache.keys().next().value);
     thumbCache.set(cacheKey, thumbBuffer);
 
     res.setHeader('Content-Type', 'image/jpeg');
