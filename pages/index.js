@@ -1,5 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useRouter } from 'next/router';
 import Head from 'next/head';
+import Link from 'next/link';
+import { getWatchedIds, toggleFavorite, isFavorite, addWatched } from '../lib/storage';
 
 // ─── 硬編碼 API 憑證（直接寫入，無需登入時手動輸入）─────────────────────────
 const HARDCODED_API_ID = '39092753';
@@ -12,7 +15,7 @@ function fmtDuration(secs) {
   const h = Math.floor(secs / 3600);
   const m = Math.floor((secs % 3600) / 60);
   const s = Math.floor(secs % 60);
-  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '00')}`;
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 function fmtBytes(b) {
@@ -66,6 +69,37 @@ function Btn({ children, onClick, disabled, variant = 'primary', style: s, ...p 
     <button onClick={disabled ? undefined : onClick} style={{ ...base, ...variants[variant] }} {...p}>
       {children}
     </button>
+  );
+}
+
+// ─── NavBar ────────────────────────────────────────────────────────────────────
+
+function NavBar({ active }) {
+  const items = [
+    { href: '/', icon: '🏠', label: '首頁', key: 'home' },
+    { href: '/favorites', icon: '❤️', label: '最愛', key: 'favorites' },
+    { href: '/watched', icon: '👁', label: '已瀏覽', key: 'watched' },
+  ];
+  return (
+    <nav style={{ position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 100, background: 'rgba(13,13,15,0.96)', backdropFilter: 'blur(14px)', borderTop: '1px solid #1f1f23', display: 'flex', height: 58 }}>
+      {items.map(item => (
+        <Link key={item.key} href={item.href} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, color: active === item.key ? '#a78bfa' : '#52525b', textDecoration: 'none', fontSize: 11, fontWeight: 600, transition: 'color 0.15s' }}>
+          <span style={{ fontSize: 22 }}>{item.icon}</span>
+          {item.label}
+        </Link>
+      ))}
+    </nav>
+  );
+}
+
+// ─── Toast ────────────────────────────────────────────────────────────────────
+
+function Toast({ message }) {
+  if (!message) return null;
+  return (
+    <div style={{ position: 'fixed', bottom: 72, left: '50%', transform: 'translateX(-50%)', background: '#27272b', border: '1px solid #3f3f46', color: '#f4f4f5', padding: '10px 22px', borderRadius: 24, fontSize: 13, zIndex: 2000, whiteSpace: 'nowrap', pointerEvents: 'none', boxShadow: '0 4px 16px rgba(0,0,0,0.4)' }}>
+      {message}
+    </div>
   );
 }
 
@@ -236,25 +270,60 @@ function LoginPage({ onLoggedIn }) {
   );
 }
 
-// ─── Video Card ────────────────────────────────────────────────────────────────
+// ─── Video Card（支援長按加入最愛、已瀏覽標記）──────────────────────────────
 
-function VideoCard({ video, onClick }) {
+function VideoCard({ video, onPlay, onLongPress, isWatched, isFav }) {
   const thumbSrc = `/api/thumb?chatId=${video.chatId}&msgId=${video.msgId}&accessHash=${video.accessHash}&chatType=${video.chatType}&accountId=${video.accountId}`;
   const [imgErr, setImgErr] = useState(false);
   const [hover, setHover] = useState(false);
+  const [pressing, setPressing] = useState(false);
+  const pressTimer = useRef(null);
+  const didLongPress = useRef(false);
+
+  function startPress() {
+    didLongPress.current = false;
+    setPressing(true);
+    pressTimer.current = setTimeout(() => {
+      didLongPress.current = true;
+      setPressing(false);
+      onLongPress(video);
+    }, 600);
+  }
+
+  function endPress() {
+    clearTimeout(pressTimer.current);
+    setPressing(false);
+    if (!didLongPress.current) {
+      onPlay(video);
+    }
+    didLongPress.current = false;
+  }
+
+  function cancelPress() {
+    clearTimeout(pressTimer.current);
+    setPressing(false);
+    didLongPress.current = false;
+  }
 
   return (
     <div
-      onClick={() => onClick(video)}
       onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
+      onMouseLeave={() => { setHover(false); cancelPress(); }}
+      onMouseDown={startPress}
+      onMouseUp={endPress}
+      onTouchStart={(e) => { e.preventDefault(); startPress(); }}
+      onTouchEnd={(e) => { e.preventDefault(); endPress(); }}
+      onTouchCancel={cancelPress}
       style={{
         background: hover ? '#27272b' : '#1f1f23',
         borderRadius: 12, overflow: 'hidden', cursor: 'pointer',
-        border: '1px solid #2e2e35',
-        transition: 'transform 0.15s, background 0.15s, box-shadow 0.15s',
-        transform: hover ? 'translateY(-2px)' : 'none',
+        border: `1px solid ${pressing ? '#7c3aed' : '#2e2e35'}`,
+        transition: 'transform 0.15s, background 0.15s, box-shadow 0.15s, border-color 0.15s',
+        transform: pressing ? 'scale(0.97)' : hover ? 'translateY(-2px)' : 'none',
         boxShadow: hover ? '0 8px 24px rgba(0,0,0,0.4)' : 'none',
+        userSelect: 'none',
+        WebkitUserSelect: 'none',
+        opacity: isWatched ? 0.65 : 1,
       }}
     >
       {/* Thumbnail */}
@@ -264,6 +333,10 @@ function VideoCard({ video, onClick }) {
             style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
         ) : (
           <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 36, opacity: 0.3 }}>🎬</div>
+        )}
+        {/* Watched overlay */}
+        {isWatched && (
+          <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.4)' }} />
         )}
         {/* Play overlay */}
         <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.3)', opacity: hover ? 1 : 0, transition: 'opacity 0.15s' }}>
@@ -275,6 +348,14 @@ function VideoCard({ video, onClick }) {
             {fmtDuration(video.duration)}
           </div>
         )}
+        {/* Watched badge */}
+        {isWatched && (
+          <div style={{ position: 'absolute', top: 6, left: 6, background: 'rgba(0,0,0,0.65)', color: '#a1a1aa', borderRadius: 4, padding: '2px 6px', fontSize: 10 }}>👁 已看</div>
+        )}
+        {/* Favorite badge */}
+        {isFav && (
+          <div style={{ position: 'absolute', top: 6, right: 6, fontSize: 14 }}>❤️</div>
+        )}
       </div>
       {/* Meta */}
       <div style={{ padding: '10px 12px' }}>
@@ -285,60 +366,6 @@ function VideoCard({ video, onClick }) {
         <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4, fontSize: 11, color: '#52525b' }}>
           <span>{fmtDate(video.date)}</span>
           <span>{fmtBytes(video.fileSize)}</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Video Modal（直接線上串流，無需等待下載）──────────────────────────────────
-
-function VideoModal({ video, onClose }) {
-  const streamUrl = video
-    ? `/api/stream?chatId=${video.chatId}&msgId=${video.msgId}&accessHash=${video.accessHash}&chatType=${video.chatType}&mimeType=${encodeURIComponent(video.mimeType || 'video/mp4')}&accountId=${video.accountId}`
-    : '';
-
-  // Close on Escape
-  useEffect(() => {
-    const fn = (e) => { if (e.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', fn);
-    return () => window.removeEventListener('keydown', fn);
-  }, [onClose]);
-
-  if (!video) return null;
-
-  return (
-    <div
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
-      style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.88)', backdropFilter: 'blur(10px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}
-    >
-      <div style={{ width: '100%', maxWidth: 960, background: '#18181b', borderRadius: 16, border: '1px solid #27272b', overflow: 'hidden' }}>
-        {/* Header */}
-        <div style={{ padding: '14px 18px', display: 'flex', alignItems: 'flex-start', gap: 12, borderBottom: '1px solid #27272b' }}>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <p style={{ fontWeight: 600, fontSize: 15, lineHeight: 1.4 }}>{video.title || '影片'}</p>
-            <p style={{ color: '#71717a', fontSize: 12, marginTop: 3 }}>
-              {video.chatTitle} · {fmtDate(video.date)} · {fmtDuration(video.duration)} · {fmtBytes(video.fileSize)}
-            </p>
-          </div>
-          <button onClick={onClose} style={{ color: '#71717a', fontSize: 22, background: 'none', lineHeight: 1, cursor: 'pointer', flexShrink: 0 }}>×</button>
-        </div>
-
-        {/* 直接串流播放 — 瀏覽器原生進度條 */}
-        <div style={{ background: '#000' }}>
-          <video
-            key={video.id}
-            src={streamUrl}
-            controls
-            autoPlay
-            playsInline
-            style={{
-              width: '100%',
-              aspectRatio: video.width && video.height ? `${video.width}/${video.height}` : '16/9',
-              display: 'block',
-              maxHeight: '75vh',
-            }}
-          />
         </div>
       </div>
     </div>
@@ -442,6 +469,7 @@ function DurationFilter({ minDuration, maxDuration, onChange }) {
 // ─── Main App ─────────────────────────────────────────────────────────────────
 
 export default function Home() {
+  const router = useRouter();
   const [view, setView] = useState('loading');
   const [accounts, setAccounts] = useState([]);
   const [activeId, setActiveId] = useState(null);
@@ -452,12 +480,17 @@ export default function Home() {
   const [minDuration, setMinDuration] = useState(10);
   const [maxDuration, setMaxDuration] = useState(180);
   const [maxGroups, setMaxGroups] = useState(30);
-  const [selectedVideo, setSelectedVideo] = useState(null);
+  const [watchedIds, setWatchedIds] = useState(new Set());
+  const [favIds, setFavIds] = useState(new Set());
+  const [hideWatched, setHideWatched] = useState(true);
+  const [toast, setToast] = useState('');
   const esRef = useRef(null);
   const searchTimer = useRef(null);
+  const toastTimer = useRef(null);
 
-  // Load accounts on mount
+  // Load accounts + watched/fav state on mount
   useEffect(() => {
+    setWatchedIds(getWatchedIds());
     (async () => {
       try {
         const data = await api('/api/accounts');
@@ -473,6 +506,22 @@ export default function Home() {
       }
     })();
   }, []);
+
+  // Refresh fav/watched when returning to page
+  useEffect(() => {
+    if (view !== 'main') return;
+    const refresh = () => {
+      setWatchedIds(getWatchedIds());
+    };
+    window.addEventListener('focus', refresh);
+    return () => window.removeEventListener('focus', refresh);
+  }, [view]);
+
+  const showToast = (msg) => {
+    setToast(msg);
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(''), 2000);
+  };
 
   // Scan videos via SSE
   const scanVideos = useCallback((searchQ = '', minD = minDuration, maxD = maxDuration, accountId) => {
@@ -548,13 +597,50 @@ export default function Home() {
     setView('main');
   }
 
-  // Client-side search filter (instant feedback while server scans)
-  const filteredVideos = search
-    ? videos.filter((v) => {
-        const q = search.toLowerCase();
-        return (v.title || '').toLowerCase().includes(q) || (v.chatTitle || '').toLowerCase().includes(q);
-      })
-    : videos;
+  // Navigate to /video page
+  function handlePlay(video) {
+    addWatched(video);
+    setWatchedIds((prev) => new Set([...prev, video.id]));
+    const p = new URLSearchParams({
+      chatId: video.chatId, msgId: video.msgId,
+      accessHash: video.accessHash || '', chatType: video.chatType || '',
+      mimeType: video.mimeType || 'video/mp4', accountId: video.accountId || '',
+      title: video.title || '', chatTitle: video.chatTitle || '',
+      date: video.date || 0, duration: video.duration || 0,
+      fileSize: video.fileSize || 0, hasThumbnail: video.hasThumbnail ? 'true' : 'false',
+    });
+    router.push(`/video?${p}`);
+  }
+
+  // Long press → toggle favorite
+  function handleLongPress(video) {
+    const added = toggleFavorite(video);
+    setFavIds((prev) => {
+      const next = new Set(prev);
+      if (added) next.add(video.id); else next.delete(video.id);
+      return next;
+    });
+    showToast(added ? '❤️ 已加入最愛' : '🤍 已從最愛移除');
+  }
+
+  // Init favIds from localStorage
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const fav = JSON.parse(localStorage.getItem('tg_favorites') || '[]');
+      setFavIds(new Set(fav.map((v) => v.id)));
+    } catch {}
+  }, []);
+
+  // Client-side filter
+  const filteredVideos = videos.filter((v) => {
+    if (hideWatched && watchedIds.has(v.id)) return false;
+    if (search) {
+      const q = search.toLowerCase();
+      return (v.title || '').toLowerCase().includes(q) || (v.chatTitle || '').toLowerCase().includes(q);
+    }
+    return true;
+  });
 
   // ─── Render ───────────────────────────────────────────────────────────────
 
@@ -567,7 +653,14 @@ export default function Home() {
   if (view === 'login') return (
     <>
       <Head><title>Telegram 影片瀏覽器</title></Head>
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      <style>{`
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background: #0d0d0f; color: #f4f4f5; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; -webkit-font-smoothing: antialiased; }
+        input { width: 100%; background: #27272b; border: 1px solid #3f3f46; border-radius: 8px; padding: 10px 14px; color: #f4f4f5; font-size: 15px; outline: none; }
+        input:focus { border-color: #7c3aed; }
+        button { border: none; background: none; font-family: inherit; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+      `}</style>
       <LoginPage onLoggedIn={handleLoggedIn} />
     </>
   );
@@ -579,6 +672,11 @@ export default function Home() {
         <meta name="viewport" content="width=device-width, initial-scale=1" />
       </Head>
       <style>{`
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background: #0d0d0f; color: #f4f4f5; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; -webkit-font-smoothing: antialiased; }
+        input { width: 100%; background: #27272b; border: 1px solid #3f3f46; border-radius: 8px; padding: 10px 14px; color: #f4f4f5; font-size: 15px; outline: none; }
+        input:focus { border-color: #7c3aed; }
+        button { border: none; background: none; font-family: inherit; }
         @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
         .vcard { animation: fadeIn 0.2s ease both; }
@@ -590,6 +688,8 @@ export default function Home() {
         @media (max-width: 480px) {
           .video-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
         }
+        ::-webkit-scrollbar { width: 5px; }
+        ::-webkit-scrollbar-thumb { background: #2e2e35; border-radius: 3px; }
       `}</style>
 
       {/* ── Header ── */}
@@ -631,6 +731,22 @@ export default function Home() {
           </span>
         </div>
 
+        {/* Hide watched toggle */}
+        <button
+          onClick={() => setHideWatched((v) => !v)}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 5, padding: '4px 10px',
+            borderRadius: 20, fontSize: 12, cursor: 'pointer',
+            border: '1px solid',
+            borderColor: hideWatched ? '#7c3aed' : '#2e2e35',
+            background: hideWatched ? '#7c3aed22' : 'transparent',
+            color: hideWatched ? '#a78bfa' : '#71717a',
+            transition: 'all 0.15s', whiteSpace: 'nowrap',
+          }}
+        >
+          {hideWatched ? '👁 隱藏已看' : '👁 顯示已看'}
+        </button>
+
         {/* Duration filter */}
         <DurationFilter minDuration={minDuration} maxDuration={maxDuration} onChange={handleDurationChange} />
 
@@ -645,30 +761,51 @@ export default function Home() {
       </div>
 
       {/* ── Video Grid ── */}
-      <main style={{ padding: '16px', minHeight: 'calc(100vh - 110px)' }}>
+      <main style={{ padding: '16px', paddingBottom: 80, minHeight: 'calc(100vh - 110px)' }}>
         {filteredVideos.length === 0 && !scanning && (
           <div style={{ textAlign: 'center', padding: '80px 20px', color: '#52525b' }}>
             <div style={{ fontSize: 56, marginBottom: 16 }}>🎬</div>
             <p style={{ fontSize: 18, fontWeight: 600, color: '#3f3f46' }}>
-              {search ? '找不到符合的影片' : '尚未找到影片'}
+              {search ? '找不到符合的影片' : hideWatched && watchedIds.size > 0 ? '所有影片都已看過' : '尚未找到影片'}
             </p>
             <p style={{ marginTop: 8, fontSize: 13 }}>
-              {search ? '請嘗試不同關鍵字，或調整時長篩選' : '點擊 ↻ 重新掃描群組'}
+              {search
+                ? '請嘗試不同關鍵字，或調整時長篩選'
+                : hideWatched && watchedIds.size > 0
+                ? '點擊「顯示已看」可以重新瀏覽'
+                : '點擊 ↻ 重新掃描群組'}
             </p>
+            {hideWatched && watchedIds.size > 0 && !search && (
+              <button
+                onClick={() => setHideWatched(false)}
+                style={{ marginTop: 20, padding: '10px 24px', background: '#7c3aed', color: '#fff', borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: 'pointer' }}
+              >
+                顯示已看影片
+              </button>
+            )}
           </div>
         )}
 
         <div className="video-grid">
           {filteredVideos.map((v, i) => (
             <div key={v.id} className="vcard" style={{ animationDelay: `${Math.min(i * 0.025, 0.4)}s` }}>
-              <VideoCard video={v} onClick={setSelectedVideo} />
+              <VideoCard
+                video={v}
+                onPlay={handlePlay}
+                onLongPress={handleLongPress}
+                isWatched={watchedIds.has(v.id)}
+                isFav={favIds.has(v.id)}
+              />
             </div>
           ))}
         </div>
       </main>
 
-      {/* ── Video Modal ── */}
-      {selectedVideo && <VideoModal video={selectedVideo} onClose={() => setSelectedVideo(null)} />}
+      {/* ── Toast ── */}
+      <Toast message={toast} />
+
+      {/* ── Bottom Nav ── */}
+      <NavBar active="home" />
     </>
   );
 }
