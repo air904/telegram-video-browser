@@ -349,7 +349,7 @@ export default function SettingsPage() {
         {/* Section: About */}
         <div style={{ borderRadius: 12, background: '#111113', border: '1px solid #1f1f23', padding: '16px', textAlign: 'center' }}>
           <p style={{ fontSize: 13, color: '#52525b' }}>Telegram 影片瀏覽器</p>
-          <p style={{ fontSize: 20, fontWeight: 700, color: '#3f3f46', marginTop: 4 }}>v1.1</p>
+          <p style={{ fontSize: 20, fontWeight: 700, color: '#3f3f46', marginTop: 4 }}>v1.2</p>
         </div>
       </main>
 

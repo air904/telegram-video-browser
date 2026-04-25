@@ -4,10 +4,14 @@
  * 兩種掃描模式：
  *
  * 模式 A（快速）— 前端傳入已知群組詳細資料，直接跳過 getDialogs
- *   ?groupsInfo=chatId1:hash1:type1:title1,chatId2:hash2:type2:title2
+ *   ?groupsInfo=chatId1:hash1:type1:title1,...
  *
  * 模式 B（全掃）— 無 groupsInfo，掃描最近的 maxGroups 個群組
  *   ?maxGroups=30&search=&minDuration=10&maxDuration=180
+ *
+ * 共用參數：
+ *   videosPerGroup=50   每個群組最多回傳幾支（dedup 後）
+ *   days=7              只顯示最近幾天的影片（0 = 不限）
  *
  * SSE events:
  *   { type: 'total_chats', count }
@@ -30,12 +34,18 @@ export default async function handler(req, res) {
     accountId,
     minDuration = '10',
     maxDuration = '180',
-    groupsInfo = '',   // 模式 A：chatId:hash:type:encodedTitle,...
-    chatIds = '',      // 舊版相容（只有 chatId，沒有 hash）
+    videosPerGroup = '50',  // 每個群組最多回傳幾支（dedup 後）
+    days = '7',             // 只顯示最近 N 天；0 = 不限
+    groupsInfo = '',        // 模式 A：chatId:hash:type:encodedTitle,...
+    chatIds = '',           // 舊版相容
   } = req.query;
 
   const minSec = parseInt(minDuration) || 0;
   const maxSec = parseInt(maxDuration) || Infinity;
+  const vPerGroup = Math.max(1, parseInt(videosPerGroup) || 50);
+  const daysBack = parseInt(days) || 0;
+  // Unix timestamp cutoff（0 = 無限制）
+  const cutoffTs = daysBack > 0 ? Math.floor(Date.now() / 1000) - daysBack * 86400 : 0;
 
   const account = getActiveAccount(req, accountId);
   if (!account) {
@@ -91,7 +101,7 @@ export default async function handler(req, res) {
       for (const group of groups) {
         if (res.writableEnded) break;
         send({ type: 'scanning', chat: group.chatTitle });
-        totalVideos += await scanGroup(client, group, minSec, maxSec, searchLower, send, account);
+        totalVideos += await scanGroup(client, group, minSec, maxSec, searchLower, send, account, vPerGroup, cutoffTs);
       }
 
       send({ type: 'done', total: totalVideos });
@@ -131,7 +141,7 @@ export default async function handler(req, res) {
       totalVideos += await scanGroup(
         client,
         { chatId, accessHash, chatType, chatTitle },
-        minSec, maxSec, searchLower, send, account
+        minSec, maxSec, searchLower, send, account, vPerGroup, cutoffTs
       );
     }
 
@@ -147,15 +157,27 @@ export default async function handler(req, res) {
 
 // ── 掃描單一群組，回傳影片數；含 dedup 邏輯 ──────────────────────────────────
 
-async function scanGroup(client, { chatId, accessHash, chatType, chatTitle }, minSec, maxSec, searchLower, send, account) {
+async function scanGroup(
+  client,
+  { chatId, accessHash, chatType, chatTitle },
+  minSec, maxSec, searchLower, send, account,
+  vPerGroup = 50,   // 每群組最多輸出幾支（dedup 後）
+  cutoffTs = 0      // Unix 時間截止（0 = 不限）
+) {
   try {
     const peer = buildInputPeer(chatId, accessHash, chatType);
-    const dedupMap = new Map(); // fileName (or msgId) → latest video
+    const dedupMap = new Map(); // dedupKey → latest video
+
+    // 最多抓 vPerGroup * 8 則訊息（保留足夠裕量給 dedup 和時長篩選）
+    const fetchLimit = Math.min(vPerGroup * 8, 800);
 
     for await (const msg of client.iterMessages(peer, {
-      limit: 200,
+      limit: fetchLimit,
       filter: new Api.InputMessagesFilterVideo(),
     })) {
+      // 訊息是從新到舊排列，一旦超出天數截止就可以 break
+      if (cutoffTs > 0 && msg.date < cutoffTs) break;
+
       if (!msg?.media?.document) continue;
       const doc = msg.media.document;
       if (!doc?.mimeType?.startsWith('video/')) continue;
@@ -203,7 +225,11 @@ async function scanGroup(client, { chatId, accessHash, chatType, chatTitle }, mi
       }
     }
 
-    const sorted = [...dedupMap.values()].sort((a, b) => b.date - a.date);
+    // 最新的 vPerGroup 支
+    const sorted = [...dedupMap.values()]
+      .sort((a, b) => b.date - a.date)
+      .slice(0, vPerGroup);
+
     for (const video of sorted) send({ type: 'video', video });
     return sorted.length;
 

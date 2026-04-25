@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/router';
 import Head from 'next/head';
 import Link from 'next/link';
-import { toggleFavorite, addWatched, savePlaylist, getKnownGroups, saveKnownGroups, getSelectedGroupIds } from '../lib/storage';
+import { toggleFavorite, addWatched, savePlaylist, getKnownGroups, saveKnownGroups, getSelectedGroupIds, saveCachedVideos, getCachedVideos, clearCachedVideos } from '../lib/storage';
 
 // ─── 硬編碼 API 憑證（直接寫入，無需登入時手動輸入）─────────────────────────
 const HARDCODED_API_ID = '39092753';
@@ -505,7 +505,8 @@ export default function Home() {
   const [search, setSearch] = useState('');
   const [minDuration, setMinDuration] = useState(10);
   const [maxDuration, setMaxDuration] = useState(180);
-  const [maxGroups, setMaxGroups] = useState(30);
+  const [videosPerGroup, setVideosPerGroup] = useState(50); // 每群組最多顯示幾支
+  const [days, setDays] = useState(7);                      // 顯示最近幾天
   const [favIds, setFavIds] = useState(new Set());
   const [scanDone, setScanDone] = useState(true);  // 掃描完成才載入縮圖，避免 AUTH_KEY_DUPLICATED
   const [selectedGroupIds, setSelectedGroupIds] = useState(null); // null = 全部, [] = 無
@@ -526,7 +527,16 @@ export default function Home() {
         if (data.accounts?.length) {
           setAccounts(data.accounts);
           setActiveId(data.activeAccountId);
-          setView('main');
+
+          // 優先恢復快取（從影片頁返回時不重掃）
+          const cached = getCachedVideos(JSON.stringify(ids));
+          if (cached && cached.length > 0) {
+            setVideos(cached);
+            setScanDone(true);
+            setView('main_cached'); // 特殊 flag：已有快取，跳過 scan trigger
+          } else {
+            setView('main');
+          }
         } else {
           setView('login');
         }
@@ -545,7 +555,13 @@ export default function Home() {
 
   // Scan videos via SSE
   // overrideIds: string[]|null — 指定掃描的 chatId 清單，undefined = 用 selectedGroupIds
-  const scanVideos = useCallback((searchQ = '', minD = minDuration, maxD = maxDuration, accountId, overrideIds) => {
+  // vPerGroup / daysBack: 覆蓋 state（在 handler 內立即使用新值時傳入）
+  const scanVideos = useCallback((
+    searchQ = '', minD = minDuration, maxD = maxDuration,
+    accountId, overrideIds,
+    vPerGroup = videosPerGroup, daysBack = days
+  ) => {
+    clearCachedVideos(); // 重掃一律清快取
     if (esRef.current) { esRef.current.close(); esRef.current = null; }
     setVideos([]);
     setScanning(true);
@@ -555,10 +571,11 @@ export default function Home() {
     const accId = accountId || activeId;
     const params = new URLSearchParams({
       search: searchQ,
-      maxGroups,
       accountId: accId,
       minDuration: minD,
       maxDuration: maxD,
+      videosPerGroup: vPerGroup,
+      days: daysBack,
     });
 
     // 決定要掃哪些群組
@@ -614,11 +631,12 @@ export default function Home() {
       } catch {}
     };
     es.onerror = () => { setScanning(false); setScanStatus('連線中斷'); es.close(); setScanDone(true); };
-  }, [activeId, maxGroups, minDuration, maxDuration]);
+  }, [activeId, videosPerGroup, days, minDuration, maxDuration]);
 
   useEffect(() => {
+    // main_cached = 從影片頁返回，已有快取，不重掃
+    // main = 首次進入或需要重新掃描
     if (view === 'main' && activeId) {
-      // 若有選擇群組才掃描；若 selectedGroupIds 為 [] 則不掃描（等使用者去設定選群組）
       if (selectedGroupIds === null || (selectedGroupIds && selectedGroupIds.length > 0)) {
         scanVideos('', minDuration, maxDuration, activeId, selectedGroupIds);
       }
@@ -636,10 +654,23 @@ export default function Home() {
   const handleDurationChange = (minD, maxD) => {
     setMinDuration(minD);
     setMaxDuration(maxD);
-    scanVideos(search, minD, maxD);
+    scanVideos(search, minD, maxD, undefined, undefined, videosPerGroup, days);
+  };
+
+  // Videos per group change → re-scan
+  const handleVPerGroupChange = (v) => {
+    setVideosPerGroup(v);
+    scanVideos(search, minDuration, maxDuration, undefined, undefined, v, days);
+  };
+
+  // Days change → re-scan
+  const handleDaysChange = (d) => {
+    setDays(d);
+    scanVideos(search, minDuration, maxDuration, undefined, undefined, videosPerGroup, d);
   };
 
   async function handleSwitch(id) {
+    clearCachedVideos();
     await api('/api/accounts?action=switch', { method: 'POST', body: { id } });
     setActiveId(id);
     setAccounts((prev) => prev.map((a) => ({ ...a, active: a.id === id })));
@@ -647,6 +678,7 @@ export default function Home() {
   }
 
   async function handleLogout(id) {
+    clearCachedVideos();
     await api('/api/accounts?action=logout', { method: 'POST', body: { id } });
     const data = await api('/api/accounts');
     setAccounts(data.accounts || []);
@@ -656,6 +688,7 @@ export default function Home() {
   }
 
   function handleLoggedIn(account) {
+    clearCachedVideos();
     setAccounts((prev) => {
       const next = prev.filter((a) => a.id !== account.id);
       return [...next, account];
@@ -667,6 +700,8 @@ export default function Home() {
   // Navigate to /video page
   function handlePlay(video) {
     addWatched(video);
+    // 存快取，返回時不需重掃
+    saveCachedVideos(videos, JSON.stringify(selectedGroupIds));
     savePlaylist(filteredVideos);
     const p = new URLSearchParams({
       chatId: video.chatId, msgId: video.msgId,
@@ -706,9 +741,11 @@ export default function Home() {
       const prev = prevSelectedRef.current;
       const changed = JSON.stringify(prev) !== JSON.stringify(newIds);
       if (changed) {
+        clearCachedVideos(); // 群組選擇改變，舊快取作廢
         setSelectedGroupIds(newIds);
         prevSelectedRef.current = newIds;
-        if (view === 'main' && activeId) {
+        const isMain = view === 'main' || view === 'main_cached';
+        if (isMain && activeId) {
           if (newIds === null || newIds.length > 0) {
             scanVideos('', minDuration, maxDuration, activeId, newIds);
           } else {
@@ -734,6 +771,8 @@ export default function Home() {
   });
 
   // ─── Render ───────────────────────────────────────────────────────────────
+
+  const isMainView = view === 'main' || view === 'main_cached';
 
   if (view === 'loading') return (
     <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -787,7 +826,7 @@ export default function Home() {
       <header style={{ position: 'sticky', top: 0, zIndex: 50, background: 'rgba(13,13,15,0.9)', backdropFilter: 'blur(14px)', borderBottom: '1px solid #1f1f23', padding: '0 16px', display: 'flex', alignItems: 'center', gap: 12, height: 58 }}>
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flexShrink: 0 }}>
           <span style={{ fontSize: 22, lineHeight: 1 }}>📺</span>
-          <span style={{ fontSize: 9, color: '#52525b', letterSpacing: '0.02em' }}>v1.1</span>
+          <span style={{ fontSize: 9, color: '#52525b', letterSpacing: '0.02em' }}>v1.2</span>
         </div>
 
         {/* Search */}
@@ -838,12 +877,22 @@ export default function Home() {
         {/* Duration filter */}
         <DurationFilter minDuration={minDuration} maxDuration={maxDuration} onChange={handleDurationChange} />
 
-        {/* Max groups */}
+        {/* Videos per group */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#71717a', flexShrink: 0 }}>
-          <span>群組上限</span>
-          <select value={maxGroups} onChange={(e) => setMaxGroups(Number(e.target.value))}
+          <span>群組影片</span>
+          <select value={videosPerGroup} onChange={(e) => handleVPerGroupChange(Number(e.target.value))}
             style={{ background: '#27272b', color: '#f4f4f5', border: '1px solid #3f3f46', borderRadius: 6, padding: '3px 7px', fontSize: 12 }}>
-            {[10, 20, 30, 50, 100].map((n) => <option key={n} value={n}>{n} 個</option>)}
+            {[10, 20, 50, 100, 200].map((n) => <option key={n} value={n}>{n} 支</option>)}
+          </select>
+        </div>
+
+        {/* Days */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#71717a', flexShrink: 0 }}>
+          <span>天數</span>
+          <select value={days} onChange={(e) => handleDaysChange(Number(e.target.value))}
+            style={{ background: '#27272b', color: '#f4f4f5', border: '1px solid #3f3f46', borderRadius: 6, padding: '3px 7px', fontSize: 12 }}>
+            {[1, 3, 7, 14, 30, 90].map((d) => <option key={d} value={d}>{d} 天</option>)}
+            <option value={0}>不限</option>
           </select>
         </div>
       </div>
