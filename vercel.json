@@ -1,0 +1,25 @@
+{
+  "functions": {
+    "pages/api/videos.js": {
+      "maxDuration": 300,
+      "memory": 1024
+    },
+    "pages/api/stream.js": {
+      "maxDuration": 300,
+      "memory": 1024
+    },
+    "pages/api/thumb.js": {
+      "maxDuration": 60,
+      "memory": 512
+    },
+    "pages/api/auth/send-code.js": {
+      "maxDuration": 30
+    },
+    "pages/api/auth/verify-code.js": {
+      "maxDuration": 30
+    },
+    "pages/api/auth/verify-2fa.js": {
+      "maxDuration": 30
+    }
+  }
+}
