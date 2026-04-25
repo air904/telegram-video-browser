@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/router';
 import Head from 'next/head';
 import Link from 'next/link';
-import { getWatchedIds, toggleFavorite, isFavorite, addWatched, savePlaylist } from '../lib/storage';
+import { toggleFavorite, isFavorite, addWatched, savePlaylist } from '../lib/storage';
 
 // ─── 硬編碼 API 憑證（直接寫入，無需登入時手動輸入）─────────────────────────
 const HARDCODED_API_ID = '39092753';
@@ -78,7 +78,6 @@ function NavBar({ active }) {
   const items = [
     { href: '/', icon: '🏠', label: '首頁', key: 'home' },
     { href: '/favorites', icon: '❤️', label: '最愛', key: 'favorites' },
-    { href: '/watched', icon: '👁', label: '已瀏覽', key: 'watched' },
   ];
   return (
     <nav style={{ position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 100, background: 'rgba(13,13,15,0.96)', backdropFilter: 'blur(14px)', borderTop: '1px solid #1f1f23', display: 'flex', height: 58 }}>
@@ -480,17 +479,14 @@ export default function Home() {
   const [minDuration, setMinDuration] = useState(10);
   const [maxDuration, setMaxDuration] = useState(180);
   const [maxGroups, setMaxGroups] = useState(30);
-  const [watchedIds, setWatchedIds] = useState(new Set());
   const [favIds, setFavIds] = useState(new Set());
-  const [hideWatched, setHideWatched] = useState(true);
   const [toast, setToast] = useState('');
   const esRef = useRef(null);
   const searchTimer = useRef(null);
   const toastTimer = useRef(null);
 
-  // Load accounts + watched/fav state on mount
+  // Load accounts on mount
   useEffect(() => {
-    setWatchedIds(getWatchedIds());
     (async () => {
       try {
         const data = await api('/api/accounts');
@@ -507,15 +503,6 @@ export default function Home() {
     })();
   }, []);
 
-  // Refresh fav/watched when returning to page
-  useEffect(() => {
-    if (view !== 'main') return;
-    const refresh = () => {
-      setWatchedIds(getWatchedIds());
-    };
-    window.addEventListener('focus', refresh);
-    return () => window.removeEventListener('focus', refresh);
-  }, [view]);
 
   const showToast = (msg) => {
     setToast(msg);
@@ -600,7 +587,6 @@ export default function Home() {
   // Navigate to /video page
   function handlePlay(video) {
     addWatched(video);
-    setWatchedIds((prev) => new Set([...prev, video.id]));
     savePlaylist(filteredVideos);
     const p = new URLSearchParams({
       chatId: video.chatId, msgId: video.msgId,
@@ -633,15 +619,13 @@ export default function Home() {
     } catch {}
   }, []);
 
-  // Client-side filter
-  const filteredVideos = videos.filter((v) => {
-    if (hideWatched && watchedIds.has(v.id)) return false;
-    if (search) {
-      const q = search.toLowerCase();
-      return (v.title || '').toLowerCase().includes(q) || (v.chatTitle || '').toLowerCase().includes(q);
-    }
-    return true;
-  });
+  // Client-side search filter
+  const filteredVideos = search
+    ? videos.filter((v) => {
+        const q = search.toLowerCase();
+        return (v.title || '').toLowerCase().includes(q) || (v.chatTitle || '').toLowerCase().includes(q);
+      })
+    : videos;
 
   // ─── Render ───────────────────────────────────────────────────────────────
 
@@ -732,22 +716,6 @@ export default function Home() {
           </span>
         </div>
 
-        {/* Hide watched toggle */}
-        <button
-          onClick={() => setHideWatched((v) => !v)}
-          style={{
-            display: 'flex', alignItems: 'center', gap: 5, padding: '4px 10px',
-            borderRadius: 20, fontSize: 12, cursor: 'pointer',
-            border: '1px solid',
-            borderColor: hideWatched ? '#7c3aed' : '#2e2e35',
-            background: hideWatched ? '#7c3aed22' : 'transparent',
-            color: hideWatched ? '#a78bfa' : '#71717a',
-            transition: 'all 0.15s', whiteSpace: 'nowrap',
-          }}
-        >
-          {hideWatched ? '👁 隱藏已看' : '👁 顯示已看'}
-        </button>
-
         {/* Duration filter */}
         <DurationFilter minDuration={minDuration} maxDuration={maxDuration} onChange={handleDurationChange} />
 
@@ -767,23 +735,11 @@ export default function Home() {
           <div style={{ textAlign: 'center', padding: '80px 20px', color: '#52525b' }}>
             <div style={{ fontSize: 56, marginBottom: 16 }}>🎬</div>
             <p style={{ fontSize: 18, fontWeight: 600, color: '#3f3f46' }}>
-              {search ? '找不到符合的影片' : hideWatched && watchedIds.size > 0 ? '所有影片都已看過' : '尚未找到影片'}
+              {search ? '找不到符合的影片' : '尚未找到影片'}
             </p>
             <p style={{ marginTop: 8, fontSize: 13 }}>
-              {search
-                ? '請嘗試不同關鍵字，或調整時長篩選'
-                : hideWatched && watchedIds.size > 0
-                ? '點擊「顯示已看」可以重新瀏覽'
-                : '點擊 ↻ 重新掃描群組'}
+              {search ? '請嘗試不同關鍵字，或調整時長篩選' : '點擊 ↻ 重新掃描群組'}
             </p>
-            {hideWatched && watchedIds.size > 0 && !search && (
-              <button
-                onClick={() => setHideWatched(false)}
-                style={{ marginTop: 20, padding: '10px 24px', background: '#7c3aed', color: '#fff', borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: 'pointer' }}
-              >
-                顯示已看影片
-              </button>
-            )}
           </div>
         )}
 
@@ -794,7 +750,7 @@ export default function Home() {
                 video={v}
                 onPlay={handlePlay}
                 onLongPress={handleLongPress}
-                isWatched={watchedIds.has(v.id)}
+                isWatched={false}
                 isFav={favIds.has(v.id)}
               />
             </div>

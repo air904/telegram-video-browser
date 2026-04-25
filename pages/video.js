@@ -30,7 +30,6 @@ function NavBar({ active }) {
   const items = [
     { href: '/', icon: '🏠', label: '首頁', key: 'home' },
     { href: '/favorites', icon: '❤️', label: '最愛', key: 'favorites' },
-    { href: '/watched', icon: '👁', label: '已瀏覽', key: 'watched' },
   ];
   return (
     <nav style={{ position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 100, background: 'rgba(13,13,15,0.96)', backdropFilter: 'blur(14px)', borderTop: '1px solid #1f1f23', display: 'flex', height: 58 }}>
