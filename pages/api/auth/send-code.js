@@ -1,11 +1,12 @@
 /**
  * POST /api/auth/send-code
  * Body: { apiId, apiHash, phone }
- * Returns: { phoneCodeHash }
+ * Returns: { phoneCodeHash, sessionAfterCode }
  *
- * Creates a fresh Telegram client, requests an OTP, and returns the phoneCodeHash.
- * The client is disconnected after; the stateless phoneCodeHash is passed back to
- * the browser so verify-code can complete the flow from a fresh connection.
+ * Creates a fresh Telegram client, requests an OTP.
+ * IMPORTANT: We save the session string (which contains DC routing info) and
+ * return it as `sessionAfterCode`. verify-code MUST use this session so it
+ * connects to the same Telegram DC — otherwise the code appears "expired".
  */
 import { createFreshClient } from '../../../lib/telegram';
 import { Api } from 'telegram';
@@ -31,7 +32,14 @@ export default async function handler(req, res) {
       })
     );
 
-    res.json({ success: true, phoneCodeHash: result.phoneCodeHash });
+    // Save DC-aware session so verify-code can reconnect to the same server
+    const sessionAfterCode = client.session.save();
+
+    res.json({
+      success: true,
+      phoneCodeHash: result.phoneCodeHash,
+      sessionAfterCode,           // ← pass DC session to frontend
+    });
   } catch (e) {
     res.status(400).json({ error: e.message });
   } finally {

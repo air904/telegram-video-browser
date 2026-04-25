@@ -70,11 +70,19 @@ function LoginPage({ onLoggedIn }) {
   const [error, setError] = useState('');
   const [form, setForm] = useState({
     apiId: '', apiHash: '', phone: '', code: '', password: '',
-    phoneCodeHash: '', partialSession: '',
+    phoneCodeHash: '', sessionAfterCode: '', partialSession: '',
   });
+  const [countdown, setCountdown] = useState(0); // resend countdown
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const err = (e) => { setError(e.message || String(e)); setLoading(false); };
+
+  // Countdown timer for resend button
+  useEffect(() => {
+    if (countdown <= 0) return;
+    const t = setTimeout(() => setCountdown((c) => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [countdown]);
 
   async function handleCredentials(e) {
     e.preventDefault();
@@ -82,18 +90,29 @@ function LoginPage({ onLoggedIn }) {
     setStep('phone'); setError('');
   }
 
-  async function handlePhone(e) {
-    e.preventDefault();
-    if (!form.phone) return setError('請填入手機號碼');
+  async function sendCode() {
     setLoading(true); setError('');
     try {
-      const { phoneCodeHash } = await api('/api/auth/send-code', {
+      const { phoneCodeHash, sessionAfterCode } = await api('/api/auth/send-code', {
         method: 'POST', body: { apiId: form.apiId, apiHash: form.apiHash, phone: form.phone },
       });
-      setForm((f) => ({ ...f, phoneCodeHash }));
+      // Store both phoneCodeHash AND the DC session so verify-code uses the same server
+      setForm((f) => ({ ...f, phoneCodeHash, sessionAfterCode, code: '' }));
+      setCountdown(60); // allow resend after 60s
       setStep('code');
     } catch (e) { err(e); }
     setLoading(false);
+  }
+
+  async function handlePhone(e) {
+    e.preventDefault();
+    if (!form.phone) return setError('請填入手機號碼');
+    await sendCode();
+  }
+
+  async function handleResend() {
+    if (countdown > 0) return;
+    await sendCode();
   }
 
   async function handleCode(e) {
@@ -103,7 +122,11 @@ function LoginPage({ onLoggedIn }) {
     try {
       const result = await api('/api/auth/verify-code', {
         method: 'POST',
-        body: { apiId: form.apiId, apiHash: form.apiHash, phone: form.phone, phoneCodeHash: form.phoneCodeHash, code: form.code },
+        body: {
+          apiId: form.apiId, apiHash: form.apiHash, phone: form.phone,
+          phoneCodeHash: form.phoneCodeHash, code: form.code,
+          sessionAfterCode: form.sessionAfterCode,  // ← pass DC session
+        },
       });
       if (result.needsPassword) {
         setForm((f) => ({ ...f, partialSession: result.partialSession }));
@@ -205,11 +228,28 @@ function LoginPage({ onLoggedIn }) {
           {step === 'code' && (
             <form onSubmit={handleCode}>
               <h2 style={{ fontSize: 18, fontWeight: 600, marginBottom: 6 }}>輸入驗證碼</h2>
-              <p style={{ color: '#71717a', fontSize: 13, marginBottom: 20 }}>Telegram 已發送驗證碼至 {form.phone}</p>
-              <label style={{ display: 'block', marginBottom: 24 }}>
+              <p style={{ color: '#71717a', fontSize: 13, marginBottom: 4 }}>Telegram 已發送驗證碼至 {form.phone}</p>
+              <p style={{ color: '#52525b', fontSize: 11, marginBottom: 20 }}>⏱ 驗證碼有效時間約 60 秒，請盡快輸入</p>
+              <label style={{ display: 'block', marginBottom: 16 }}>
                 <span style={{ color: '#a1a1aa', fontSize: 12, marginBottom: 6, display: 'block' }}>5 位數驗證碼</span>
                 <input type="text" inputMode="numeric" placeholder="12345" maxLength={8} value={form.code} onChange={set('code')} autoFocus style={{ letterSpacing: '0.3em', fontSize: 22, textAlign: 'center' }} />
               </label>
+              {/* Resend button */}
+              <div style={{ textAlign: 'center', marginBottom: 20 }}>
+                <button
+                  type="button"
+                  onClick={handleResend}
+                  disabled={countdown > 0 || loading}
+                  style={{
+                    background: 'none', fontSize: 13,
+                    color: countdown > 0 ? '#52525b' : '#a78bfa',
+                    cursor: countdown > 0 ? 'default' : 'pointer',
+                    textDecoration: countdown > 0 ? 'none' : 'underline',
+                  }}
+                >
+                  {countdown > 0 ? `重新發送（${countdown}s）` : '沒收到？重新發送驗證碼'}
+                </button>
+              </div>
               <div style={{ display: 'flex', gap: 10 }}>
                 <Btn variant="ghost" onClick={() => setStep('phone')}>← 返回</Btn>
                 <Btn type="submit" disabled={loading} style={{ flex: 1, justifyContent: 'center' }}>

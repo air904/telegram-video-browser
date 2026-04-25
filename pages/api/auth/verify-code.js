@@ -8,21 +8,31 @@
  * If 2FA is required the partially-authenticated session string is returned
  * so verify-2fa can resume on the same cryptographic session.
  */
-import { createFreshClient, parseCookieData, buildCookieHeader } from '../../../lib/telegram';
+import { parseCookieData, buildCookieHeader } from '../../../lib/telegram';
+import { TelegramClient } from 'telegram';
+import { StringSession } from 'telegram/sessions';
 import { Api } from 'telegram';
 import crypto from 'crypto';
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end();
 
-  const { apiId, apiHash, phone, phoneCodeHash, code } = req.body || {};
+  const { apiId, apiHash, phone, phoneCodeHash, code, sessionAfterCode } = req.body || {};
   if (!apiId || !apiHash || !phone || !phoneCodeHash || !code) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
   let client;
   try {
-    client = await createFreshClient(apiId, apiHash);
+    // Use the DC-aware session from send-code so we hit the same Telegram server.
+    // Falling back to empty session risks DC mismatch → PHONE_CODE_EXPIRED.
+    client = new TelegramClient(
+      new StringSession(sessionAfterCode || ''),
+      parseInt(apiId),
+      apiHash,
+      { connectionRetries: 5, retryDelay: 1000 }
+    );
+    await client.connect();
 
     let user;
     try {
