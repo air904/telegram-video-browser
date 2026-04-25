@@ -20,6 +20,10 @@
     },
     "pages/api/auth/verify-2fa.js": {
       "maxDuration": 30
+    },
+    "pages/api/groups.js": {
+      "maxDuration": 60,
+      "memory": 512
     }
   }
 }

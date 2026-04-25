@@ -731,7 +731,7 @@ export default function Home() {
       <header style={{ position: 'sticky', top: 0, zIndex: 50, background: 'rgba(13,13,15,0.9)', backdropFilter: 'blur(14px)', borderBottom: '1px solid #1f1f23', padding: '0 16px', display: 'flex', alignItems: 'center', gap: 12, height: 58 }}>
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flexShrink: 0 }}>
           <span style={{ fontSize: 22, lineHeight: 1 }}>📺</span>
-          <span style={{ fontSize: 9, color: '#52525b', letterSpacing: '0.02em' }}>v1.0</span>
+          <span style={{ fontSize: 9, color: '#52525b', letterSpacing: '0.02em' }}>v1.1</span>
         </div>
 
         {/* Search */}

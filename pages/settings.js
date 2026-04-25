@@ -5,7 +5,7 @@
 import { useState, useEffect, useRef } from 'react';
 import Head from 'next/head';
 import Link from 'next/link';
-import { getKnownGroups, getSelectedGroupIds, saveSelectedGroupIds } from '../lib/storage';
+import { getKnownGroups, saveKnownGroups, getSelectedGroupIds, saveSelectedGroupIds } from '../lib/storage';
 
 function NavBar({ active }) {
   const items = [
@@ -25,10 +25,20 @@ function NavBar({ active }) {
   );
 }
 
+function Spinner({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" style={{ animation: 'spin 0.8s linear infinite', flexShrink: 0 }}>
+      <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" strokeWidth="3" strokeDasharray="31.4" strokeDashoffset="10" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export default function SettingsPage() {
   const [groups, setGroups] = useState([]);
   const [selectedIds, setSelectedIds] = useState(null); // null = 全部
   const [saved, setSaved] = useState(false);
+  const [collecting, setCollecting] = useState(false);
+  const [collectError, setCollectError] = useState('');
   const savedTimer = useRef(null);
 
   useEffect(() => {
@@ -43,19 +53,43 @@ export default function SettingsPage() {
     savedTimer.current = setTimeout(() => setSaved(false), 1500);
   }
 
+  // 蒐集帳號下所有群組
+  async function collectGroups() {
+    setCollecting(true);
+    setCollectError('');
+    try {
+      const res = await fetch('/api/groups', { credentials: 'same-origin' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+
+      // 合併現有 count 資料（保留已知影片數量）
+      const existingMap = new Map(groups.map(g => [g.chatId, g]));
+      const merged = data.groups.map(g => ({
+        ...g,
+        count: existingMap.get(g.chatId)?.count ?? 0,
+      }));
+
+      // 依影片數量排序，沒有資料的依名稱排序
+      merged.sort((a, b) => b.count - a.count || a.chatTitle.localeCompare(b.chatTitle, 'zh-TW'));
+
+      saveKnownGroups(merged);
+      setGroups(merged);
+      flashSaved();
+    } catch (e) {
+      setCollectError(e.message || '蒐集失敗');
+    }
+    setCollecting(false);
+  }
+
   function toggle(chatId) {
     let next;
     if (selectedIds === null) {
-      // 目前全選 → 取消這個群組
       next = groups.map(g => g.chatId).filter(id => id !== chatId);
     } else if (selectedIds.includes(chatId)) {
-      // 取消選取
       next = selectedIds.filter(id => id !== chatId);
-      if (next.length === 0) next = []; // 允許全不選
     } else {
-      // 選取
       next = [...selectedIds, chatId];
-      if (next.length === groups.length) next = null; // 全選 → 回 null
+      if (next.length === groups.length) next = null;
     }
     setSelectedIds(next);
     saveSelectedGroupIds(next);
@@ -92,6 +126,7 @@ export default function SettingsPage() {
         ::-webkit-scrollbar { width: 5px; }
         ::-webkit-scrollbar-thumb { background: #2e2e35; border-radius: 3px; }
         @keyframes fadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
+        @keyframes spin { to { transform: rotate(360deg); } }
         .row { animation: fadeIn 0.18s ease both; }
       `}</style>
 
@@ -106,7 +141,9 @@ export default function SettingsPage() {
 
         {/* Section: Group Filter */}
         <div style={{ marginBottom: 24 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+
+          {/* Section title row */}
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 12 }}>
             <div style={{ flex: 1 }}>
               <h2 style={{ fontSize: 15, fontWeight: 700 }}>📡 群組篩選</h2>
               <p style={{ fontSize: 12, color: '#71717a', marginTop: 2 }}>
@@ -114,24 +151,57 @@ export default function SettingsPage() {
                 {groups.length > 0 && ` · 已選 ${selectedCount} / ${groups.length} 個`}
               </p>
             </div>
-            <button
-              onClick={selectAll}
-              style={{ padding: '5px 10px', borderRadius: 8, fontSize: 12, fontWeight: 600, background: selectedIds === null ? '#7c3aed22' : '#18181b', color: selectedIds === null ? '#a78bfa' : '#71717a', border: `1px solid ${selectedIds === null ? '#7c3aed' : '#2e2e35'}`, cursor: 'pointer', transition: 'all 0.15s' }}
-            >全選</button>
-            <button
-              onClick={deselectAll}
-              style={{ padding: '5px 10px', borderRadius: 8, fontSize: 12, fontWeight: 600, background: '#18181b', color: '#71717a', border: '1px solid #2e2e35', cursor: 'pointer' }}
-            >全不選</button>
           </div>
 
+          {/* Collect button */}
+          <button
+            onClick={collectGroups}
+            disabled={collecting}
+            style={{
+              width: '100%', marginBottom: 14,
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+              padding: '11px 16px', borderRadius: 10, fontSize: 13, fontWeight: 600,
+              background: collecting ? '#1f1f23' : '#7c3aed',
+              color: collecting ? '#71717a' : '#fff',
+              border: collecting ? '1px solid #2e2e35' : '1px solid transparent',
+              cursor: collecting ? 'not-allowed' : 'pointer',
+              transition: 'all 0.15s',
+            }}
+          >
+            {collecting ? (
+              <><Spinner size={14} /> 蒐集中，請稍候…</>
+            ) : (
+              <>🔍 蒐集帳號下所有群組</>
+            )}
+          </button>
+
+          {/* Error message */}
+          {collectError && (
+            <div style={{ background: '#ef444422', border: '1px solid #ef444455', borderRadius: 8, padding: '10px 14px', color: '#fca5a5', fontSize: 12, marginBottom: 12 }}>
+              ⚠️ {collectError}
+            </div>
+          )}
+
+          {/* Select all / deselect all */}
+          {groups.length > 0 && (
+            <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+              <button
+                onClick={selectAll}
+                style={{ flex: 1, padding: '7px 10px', borderRadius: 8, fontSize: 12, fontWeight: 600, background: selectedIds === null ? '#7c3aed22' : '#18181b', color: selectedIds === null ? '#a78bfa' : '#71717a', border: `1px solid ${selectedIds === null ? '#7c3aed' : '#2e2e35'}`, cursor: 'pointer', transition: 'all 0.15s' }}
+              >全選</button>
+              <button
+                onClick={deselectAll}
+                style={{ flex: 1, padding: '7px 10px', borderRadius: 8, fontSize: 12, fontWeight: 600, background: '#18181b', color: '#71717a', border: '1px solid #2e2e35', cursor: 'pointer' }}
+              >全不選</button>
+            </div>
+          )}
+
+          {/* Group list */}
           {groups.length === 0 ? (
-            <div style={{ textAlign: 'center', padding: '48px 20px', color: '#52525b' }}>
-              <div style={{ fontSize: 40, marginBottom: 12 }}>📭</div>
+            <div style={{ textAlign: 'center', padding: '40px 20px', color: '#52525b', background: '#111113', borderRadius: 12, border: '1px solid #1f1f23' }}>
+              <div style={{ fontSize: 36, marginBottom: 10 }}>📭</div>
               <p style={{ fontSize: 14, fontWeight: 600, color: '#3f3f46' }}>尚無群組資料</p>
-              <p style={{ fontSize: 12, marginTop: 6 }}>請先回首頁掃描一次影片</p>
-              <Link href="/" style={{ display: 'inline-block', marginTop: 16, padding: '8px 20px', background: '#7c3aed', color: '#fff', borderRadius: 8, fontSize: 13, fontWeight: 600, textDecoration: 'none' }}>
-                前往首頁掃描
-              </Link>
+              <p style={{ fontSize: 12, marginTop: 6 }}>點擊上方「蒐集帳號下所有群組」按鈕</p>
             </div>
           ) : (
             <div style={{ borderRadius: 12, overflow: 'hidden', border: '1px solid #1f1f23' }}>
@@ -143,7 +213,7 @@ export default function SettingsPage() {
                     className="row"
                     onClick={() => toggle(g.chatId)}
                     style={{
-                      animationDelay: `${i * 0.02}s`,
+                      animationDelay: `${i * 0.015}s`,
                       display: 'flex', alignItems: 'center', gap: 14,
                       padding: '13px 16px',
                       background: checked ? '#1a1a1f' : '#111113',
@@ -168,12 +238,17 @@ export default function SettingsPage() {
                       <p style={{ fontWeight: 600, fontSize: 14, color: checked ? '#f4f4f5' : '#71717a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', transition: 'color 0.15s' }}>
                         {g.chatTitle || g.chatId}
                       </p>
+                      <p style={{ fontSize: 11, color: '#3f3f46', marginTop: 2 }}>
+                        {g.chatType === 'channel' ? '頻道' : '群組'}
+                      </p>
                     </div>
 
                     {/* Video count */}
-                    <span style={{ fontSize: 12, color: '#52525b', flexShrink: 0 }}>
-                      {g.count} 支
-                    </span>
+                    {g.count > 0 && (
+                      <span style={{ fontSize: 12, color: '#52525b', flexShrink: 0 }}>
+                        {g.count} 支
+                      </span>
+                    )}
                   </div>
                 );
               })}
@@ -184,7 +259,7 @@ export default function SettingsPage() {
         {/* Section: About */}
         <div style={{ borderRadius: 12, background: '#111113', border: '1px solid #1f1f23', padding: '16px', textAlign: 'center' }}>
           <p style={{ fontSize: 13, color: '#52525b' }}>Telegram 影片瀏覽器</p>
-          <p style={{ fontSize: 20, fontWeight: 700, color: '#3f3f46', marginTop: 4 }}>v1.0</p>
+          <p style={{ fontSize: 20, fontWeight: 700, color: '#3f3f46', marginTop: 4 }}>v1.1</p>
         </div>
       </main>
 
@@ -192,4 +267,3 @@ export default function SettingsPage() {
     </>
   );
 }
-
