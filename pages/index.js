@@ -514,8 +514,8 @@ export default function Home() {
   const esRef = useRef(null);
   const searchTimer = useRef(null);
   const toastTimer = useRef(null);
-  const prevSelectedRef = useRef(null); // 追蹤上一次選擇，避免 focus 時無謂重掃
-  const firstVideoRef = useRef(false);  // 追蹤本次掃描是否已收到第一支影片
+  const prevSelectedRef = useRef(null);   // 追蹤上一次選擇，避免 focus 時無謂重掃
+  const pendingVideosRef = useRef([]);    // 掃描期間累積新影片；done 時一次性 atomic replace
 
   // Load accounts + group selection on mount
   useEffect(() => {
@@ -564,8 +564,8 @@ export default function Home() {
   ) => {
     clearCachedVideos(); // 重掃一律清快取
     if (esRef.current) { esRef.current.close(); esRef.current = null; }
-    // 不立即清空影片，等第一支新影片抵達才換（firstVideoRef 控制），避免畫面閃空
-    firstVideoRef.current = false;
+    // 不立即清空影片 — 用 pendingVideosRef 在背景累積，掃完後一次性 atomic replace
+    pendingVideosRef.current = [];
     setScanning(true);
     setScanDone(false);
     setScanStatus('連線中…');
@@ -574,7 +574,8 @@ export default function Home() {
     const params = new URLSearchParams({
       search: searchQ,
       accountId: accId,
-      // 時長篩選改為純前端 filter，不傳給 server，避免重掃時清空畫面
+      minDuration: minD,
+      maxDuration: maxD,
       videosPerGroup: vPerGroup,
       days: daysBack,
     });
@@ -614,32 +615,29 @@ export default function Home() {
         if (data.type === 'total_chats') setScanStatus(`掃描 ${data.count} 個群組中…`);
         if (data.type === 'scanning') setScanStatus(`掃描：${data.chat}`);
         if (data.type === 'video') {
-          if (!firstVideoRef.current) {
-            firstVideoRef.current = true;
-            setVideos([]); // 第一支新影片到才清空舊清單，避免閃空
-          }
-          setVideos((v) => [...v, data.video].sort((a, b) => b.date - a.date));
+          // 只存入 pending，不動 videos state，舊影片繼續顯示
+          const sorted = [...pendingVideosRef.current, data.video].sort((a, b) => b.date - a.date);
+          pendingVideosRef.current = sorted;
         }
         if (data.type === 'done') {
-          if (!firstVideoRef.current) setVideos([]); // 掃完確實 0 支才清空
+          // Atomic replace：掃完才一次性換掉舊清單（掃到 0 支時也正確清空）
+          const finalVideos = pendingVideosRef.current;
+          setVideos(finalVideos);
           setScanning(false); setScanStatus(''); es.close();
-          setScanDone(true);  // 掃描完成 → 開始載入縮圖（SSE 那端已 disconnect Telegram）
-          // 掃描完成後更新已知群組清單
-          setVideos((prev) => {
-            const groupMap = new Map();
-            prev.forEach((v) => {
-              if (!groupMap.has(v.chatId)) groupMap.set(v.chatId, { chatId: v.chatId, chatTitle: v.chatTitle, count: 0 });
-              groupMap.get(v.chatId).count++;
-            });
-            saveKnownGroups([...groupMap.values()].sort((a, b) => b.count - a.count));
-            return prev;
+          setScanDone(true);  // 掃描完成 → 開始載入縮圖
+          // 更新已知群組清單
+          const groupMap = new Map();
+          finalVideos.forEach((v) => {
+            if (!groupMap.has(v.chatId)) groupMap.set(v.chatId, { chatId: v.chatId, chatTitle: v.chatTitle, count: 0 });
+            groupMap.get(v.chatId).count++;
           });
+          saveKnownGroups([...groupMap.values()].sort((a, b) => b.count - a.count));
         }
         if (data.type === 'error') { setScanning(false); setScanStatus(`錯誤：${data.message}`); es.close(); setScanDone(true); }
       } catch {}
     };
     es.onerror = () => { setScanning(false); setScanStatus('連線中斷'); es.close(); setScanDone(true); };
-  }, [activeId, videosPerGroup, days]);
+  }, [activeId, videosPerGroup, days, minDuration, maxDuration]);
 
   useEffect(() => {
     // main_cached = 從影片頁返回，已有快取，不重掃
@@ -906,6 +904,23 @@ export default function Home() {
             <option value={0}>不限</option>
           </select>
         </div>
+
+        {/* 重新掃描按鈕 */}
+        <button
+          onClick={() => scanVideos(search, minDuration, maxDuration, undefined, undefined, videosPerGroup, days)}
+          disabled={scanning}
+          style={{
+            flexShrink: 0, display: 'flex', alignItems: 'center', gap: 5,
+            padding: '5px 13px', borderRadius: 7, fontSize: 12, fontWeight: 600,
+            cursor: scanning ? 'not-allowed' : 'pointer',
+            opacity: scanning ? 0.5 : 1,
+            background: '#7c3aed22', color: '#a78bfa',
+            border: '1px solid #7c3aed55',
+            transition: 'all 0.15s',
+          }}
+        >
+          {scanning ? <Spinner size={12} /> : '↻'} 重新掃描
+        </button>
       </div>
 
       {/* ── Video Grid ── */}
