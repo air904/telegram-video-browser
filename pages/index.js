@@ -515,6 +515,7 @@ export default function Home() {
   const searchTimer = useRef(null);
   const toastTimer = useRef(null);
   const prevSelectedRef = useRef(null); // 追蹤上一次選擇，避免 focus 時無謂重掃
+  const firstVideoRef = useRef(false);  // 追蹤本次掃描是否已收到第一支影片
 
   // Load accounts + group selection on mount
   useEffect(() => {
@@ -563,7 +564,8 @@ export default function Home() {
   ) => {
     clearCachedVideos(); // 重掃一律清快取
     if (esRef.current) { esRef.current.close(); esRef.current = null; }
-    setVideos([]);
+    // 不立即清空影片，等第一支新影片抵達才換（firstVideoRef 控制），避免畫面閃空
+    firstVideoRef.current = false;
     setScanning(true);
     setScanDone(false);
     setScanStatus('連線中…');
@@ -572,8 +574,7 @@ export default function Home() {
     const params = new URLSearchParams({
       search: searchQ,
       accountId: accId,
-      minDuration: minD,
-      maxDuration: maxD,
+      // 時長篩選改為純前端 filter，不傳給 server，避免重掃時清空畫面
       videosPerGroup: vPerGroup,
       days: daysBack,
     });
@@ -612,8 +613,15 @@ export default function Home() {
         const data = JSON.parse(e.data);
         if (data.type === 'total_chats') setScanStatus(`掃描 ${data.count} 個群組中…`);
         if (data.type === 'scanning') setScanStatus(`掃描：${data.chat}`);
-        if (data.type === 'video') setVideos((v) => [...v, data.video].sort((a, b) => b.date - a.date));
+        if (data.type === 'video') {
+          if (!firstVideoRef.current) {
+            firstVideoRef.current = true;
+            setVideos([]); // 第一支新影片到才清空舊清單，避免閃空
+          }
+          setVideos((v) => [...v, data.video].sort((a, b) => b.date - a.date));
+        }
         if (data.type === 'done') {
+          if (!firstVideoRef.current) setVideos([]); // 掃完確實 0 支才清空
           setScanning(false); setScanStatus(''); es.close();
           setScanDone(true);  // 掃描完成 → 開始載入縮圖（SSE 那端已 disconnect Telegram）
           // 掃描完成後更新已知群組清單
@@ -631,7 +639,7 @@ export default function Home() {
       } catch {}
     };
     es.onerror = () => { setScanning(false); setScanStatus('連線中斷'); es.close(); setScanDone(true); };
-  }, [activeId, videosPerGroup, days, minDuration, maxDuration]);
+  }, [activeId, videosPerGroup, days]);
 
   useEffect(() => {
     // main_cached = 從影片頁返回，已有快取，不重掃
@@ -650,11 +658,10 @@ export default function Home() {
     searchTimer.current = setTimeout(() => scanVideos(val, minDuration, maxDuration), 700);
   };
 
-  // Duration change → re-scan
+  // Duration change → 純前端 filter，不重掃
   const handleDurationChange = (minD, maxD) => {
     setMinDuration(minD);
     setMaxDuration(maxD);
-    scanVideos(search, minD, maxD, undefined, undefined, videosPerGroup, days);
   };
 
   // Videos per group change → re-scan
@@ -761,8 +768,12 @@ export default function Home() {
     return () => window.removeEventListener('focus', onFocus);
   }, [view, activeId, minDuration, maxDuration, scanVideos]);
 
-  // Client-side filter：只剩搜尋（群組已由 server-side 過濾）
+  // Client-side filter：時長 + 搜尋（群組已由 server-side 過濾）
   const filteredVideos = videos.filter((v) => {
+    // 時長篩選（純前端，即時生效）
+    if (minDuration > 0 && v.duration < minDuration) return false;
+    if (maxDuration < 99999 && v.duration > maxDuration) return false;
+    // 關鍵字篩選
     if (search) {
       const q = search.toLowerCase();
       return (v.title || '').toLowerCase().includes(q) || (v.chatTitle || '').toLowerCase().includes(q);
