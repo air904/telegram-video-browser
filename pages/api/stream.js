@@ -1,16 +1,23 @@
 /**
  * GET /api/stream?chatId=&msgId=&accessHash=&chatType=&mimeType=&accountId=
  *
- * 直接從 Telegram 串流影片到瀏覽器，不需要預先下載。
- * 支援 HTTP Range Request（讓 <video> 可拖拉進度條）。
+ * 直接從 Telegram 串流影片到瀏覽器，支援 HTTP Range Request。
  *
- * - 無 Range header → 串流完整影片（PassThrough pipe）
- * - 有 Range header → 用 downloadMedia(start, end) 取得指定片段
+ * 修正重點：
+ *  - 改用 client.iterDownload() 取代 downloadMedia({ start, end })
+ *    （downloadMedia 不支援 byte-range，iterDownload 才是正確 API）
+ *  - 強制對齊 MTProto 4096-byte 邊界（offset 必須是 PART_SIZE 的倍數）
+ *  - 無論有無 Range header 一律回 206，每次最多回傳 CHUNK_SIZE bytes
+ *    讓瀏覽器以連續 Range request 串流，避免單次請求過大卡住
  */
 import { getActiveAccount, getTelegramClient, buildInputPeer } from '../../lib/telegram';
-import { PassThrough } from 'stream';
 
 export const config = { api: { responseLimit: false } };
+
+// MTProto 規定每次請求必須是此大小的倍數，最大 512 KB
+const PART_SIZE = 512 * 1024;  // 512 KB
+// 每個 HTTP response 最多回傳的 bytes（控制回應速度 / 避免 OOM）
+const CHUNK_SIZE = 2 * 1024 * 1024; // 2 MB
 
 export default async function handler(req, res) {
   const { chatId, msgId, accessHash, chatType, mimeType = 'video/mp4', accountId } = req.query;
@@ -18,10 +25,11 @@ export default async function handler(req, res) {
   if (!account) return res.status(401).end('Not authenticated');
 
   try {
+    const { Api } = require('telegram');
     const client = await getTelegramClient(account);
     const peer = buildInputPeer(chatId, accessHash, chatType);
 
-    // Get message metadata (needed for fileSize and Content-Type)
+    // 取得訊息 metadata
     const msgs = await client.getMessages(peer, { ids: [parseInt(msgId)] });
     const msg = msgs?.[0];
     if (!msg?.media?.document) return res.status(404).end('Not found');
@@ -30,63 +38,66 @@ export default async function handler(req, res) {
     const fileSize = Number(doc.size || 0);
     const contentType = doc.mimeType || mimeType;
 
-    // Disable cache to allow range requests from the browser
-    res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Content-Type', contentType);
-    res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('X-Accel-Buffering', 'no');
+    // 建立 Telegram 檔案 location（用於 iterDownload）
+    const inputLocation = new Api.InputDocumentFileLocation({
+      id: doc.id,
+      accessHash: doc.accessHash,
+      fileReference: doc.fileReference,
+      thumbSize: '',
+    });
 
+    // 解析 Range header（瀏覽器常送 bytes=0-1 作為探測）
     const rangeHeader = req.headers.range;
+    let start = 0;
+    let end = Math.min(CHUNK_SIZE - 1, fileSize - 1);
 
     if (rangeHeader) {
-      // ── Range request (seeking / chunked load) ──────────────────────────────
-      const [startStr, endStr] = rangeHeader.replace(/bytes=/, '').split('-');
-      const start = parseInt(startStr, 10) || 0;
-      // Default chunk: 5 MB or to end of file
-      const end = endStr ? parseInt(endStr, 10) : Math.min(start + 5 * 1024 * 1024 - 1, fileSize - 1);
-
-      res.writeHead(206, {
-        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-        'Content-Length': end - start + 1,
-        'Content-Type': contentType,
-        'Accept-Ranges': 'bytes',
-      });
-
-      // Download only the requested byte range from Telegram
-      const chunk = await client.downloadMedia(msg, {
-        start,
-        end: end + 1,   // GramJS end is exclusive
-        workers: 1,
-      });
-
-      res.end(chunk || Buffer.alloc(0));
-    } else {
-      // ── Full stream (initial play, no seek) ──────────────────────────────────
-      res.writeHead(200, {
-        'Content-Length': fileSize,
-        'Content-Type': contentType,
-        'Accept-Ranges': 'bytes',
-      });
-
-      // Pipe download directly to response — no disk I/O
-      const pass = new PassThrough();
-      pass.pipe(res);
-
-      req.on('close', () => {
-        if (!pass.destroyed) pass.destroy();
-      });
-
-      try {
-        await client.downloadMedia(msg, {
-          outputFile: pass,
-          workers: 4,
-          progressCallback: () => {}, // suppress console noise
-        });
-      } finally {
-        if (!pass.destroyed) pass.end();
-      }
+      const [s, e] = rangeHeader.replace(/bytes=/, '').split('-');
+      start = parseInt(s, 10) || 0;
+      // 若瀏覽器指定 end，取其值；否則預設 start + CHUNK_SIZE
+      end = e
+        ? Math.min(parseInt(e, 10), start + CHUNK_SIZE - 1, fileSize - 1)
+        : Math.min(start + CHUNK_SIZE - 1, fileSize - 1);
     }
+
+    const chunkLength = end - start + 1;
+
+    // 對齊到 PART_SIZE 邊界（MTProto 要求）
+    const alignedOffset = Math.floor(start / PART_SIZE) * PART_SIZE;
+    const skipBytes = start - alignedOffset;   // 對齊後多取的前置 bytes
+    const downloadNeeded = skipBytes + chunkLength;
+
+    // 回傳 206 Partial Content（包含 Range 資訊讓瀏覽器繼續請求後續片段）
+    res.writeHead(206, {
+      'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+      'Content-Length': chunkLength,
+      'Content-Type': contentType,
+      'Accept-Ranges': 'bytes',
+      'Cache-Control': 'no-store',
+      'X-Accel-Buffering': 'no',
+    });
+
+    // 用 iterDownload 從對齊位置開始下載，累積到足夠量就停止
+    const buffers = [];
+    let totalBytes = 0;
+
+    for await (const chunk of client.iterDownload({
+      file: inputLocation,
+      offset: BigInt(alignedOffset),
+      requestSize: PART_SIZE,
+    })) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      buffers.push(buf);
+      totalBytes += buf.length;
+      if (totalBytes >= downloadNeeded) break;
+    }
+
+    // 拼接後裁切出瀏覽器真正需要的 byte 範圍
+    const fullBuffer = Buffer.concat(buffers);
+    res.end(fullBuffer.slice(skipBytes, skipBytes + chunkLength));
+
   } catch (e) {
+    console.error('[stream]', e.message);
     if (!res.headersSent) res.status(500).json({ error: e.message });
   }
 }
