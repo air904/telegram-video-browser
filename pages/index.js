@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/router';
 import Head from 'next/head';
 import Link from 'next/link';
-import { toggleFavorite, isFavorite, addWatched, savePlaylist, getKnownGroups, saveKnownGroups, getSelectedGroupIds } from '../lib/storage';
+import { toggleFavorite, addWatched, savePlaylist, getKnownGroups, saveKnownGroups, getSelectedGroupIds } from '../lib/storage';
 
 // ─── 硬編碼 API 憑證（直接寫入，無需登入時手動輸入）─────────────────────────
 const HARDCODED_API_ID = '39092753';
@@ -544,12 +544,12 @@ export default function Home() {
   };
 
   // Scan videos via SSE
-  // chatIds: string[] of chatId to restrict scan, null/undefined = use current selectedGroupIds
-  const scanVideos = useCallback((searchQ = '', minD = minDuration, maxD = maxDuration, accountId, chatIds) => {
+  // overrideIds: string[]|null — 指定掃描的 chatId 清單，undefined = 用 selectedGroupIds
+  const scanVideos = useCallback((searchQ = '', minD = minDuration, maxD = maxDuration, accountId, overrideIds) => {
     if (esRef.current) { esRef.current.close(); esRef.current = null; }
     setVideos([]);
     setScanning(true);
-    setScanDone(false);   // 重置：掃描期間不載入縮圖
+    setScanDone(false);
     setScanStatus('連線中…');
 
     const accId = accountId || activeId;
@@ -560,11 +560,33 @@ export default function Home() {
       minDuration: minD,
       maxDuration: maxD,
     });
-    // Pass selected group IDs so the server only scans those groups
-    const ids = chatIds !== undefined ? chatIds : selectedGroupIds;
+
+    // 決定要掃哪些群組
+    const ids = overrideIds !== undefined ? overrideIds : selectedGroupIds;
+
     if (ids && ids.length > 0) {
-      params.set('chatIds', ids.join(','));
+      // 模式 A（快速）：從 localStorage 取出完整群組資料，直接傳給 server 跳過 getDialogs
+      const knownGroups = getKnownGroups();
+      const details = knownGroups.filter((g) => ids.includes(g.chatId));
+
+      if (details.length > 0) {
+        // 格式：chatId:accessHash:chatType:encodedTitle,...
+        const groupsInfo = details
+          .map((g) => [
+            g.chatId,
+            g.accessHash || '0',
+            g.chatType || 'channel',
+            encodeURIComponent(g.chatTitle || g.chatId),
+          ].join(':'))
+          .join(',');
+        params.set('groupsInfo', groupsInfo);
+      } else {
+        // fallback：只傳 chatId（沒有 accessHash 資料）
+        params.set('chatIds', ids.join(','));
+      }
     }
+    // ids === null → 不加任何參數 → server 掃全部群組（模式 B）
+
     const es = new EventSource(`/api/videos?${params}`);
     esRef.current = es;
 

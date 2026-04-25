@@ -1,20 +1,24 @@
 /**
  * GET /api/videos
- *   ?search=&accountId=&minDuration=10&maxDuration=180
- *   &chatIds=id1,id2,id3   ← only scan these groups (omit = scan all)
- *   &maxGroups=30           ← limit when scanning all groups
  *
- * Server-Sent Events stream:
+ * 兩種掃描模式：
+ *
+ * 模式 A（快速）— 前端傳入已知群組詳細資料，直接跳過 getDialogs
+ *   ?groupsInfo=chatId1:hash1:type1:title1,chatId2:hash2:type2:title2
+ *
+ * 模式 B（全掃）— 無 groupsInfo，掃描最近的 maxGroups 個群組
+ *   ?maxGroups=30&search=&minDuration=10&maxDuration=180
+ *
+ * SSE events:
  *   { type: 'total_chats', count }
  *   { type: 'scanning', chat }
  *   { type: 'video', video }
  *   { type: 'done', total }
  *   { type: 'error', message }
  *
- * Dedup rule: within the same group, if multiple messages share the same
- * filename, only the most recent one is emitted.
+ * Dedup: 同群組相同檔名只保留最新一筆。
  */
-import { getActiveAccount, getTelegramClient, releaseTelegramClient, bigIntReplacer } from '../../lib/telegram';
+import { getActiveAccount, getTelegramClient, releaseTelegramClient, buildInputPeer, bigIntReplacer } from '../../lib/telegram';
 import { Api } from 'telegram';
 
 export const config = { api: { responseLimit: false } };
@@ -26,12 +30,12 @@ export default async function handler(req, res) {
     accountId,
     minDuration = '10',
     maxDuration = '180',
-    chatIds = '',           // comma-separated chatId strings, empty = scan all
+    groupsInfo = '',   // 模式 A：chatId:hash:type:encodedTitle,...
+    chatIds = '',      // 舊版相容（只有 chatId，沒有 hash）
   } = req.query;
 
   const minSec = parseInt(minDuration) || 0;
   const maxSec = parseInt(maxDuration) || Infinity;
-  const selectedChatIds = chatIds ? chatIds.split(',').filter(Boolean) : [];
 
   const account = getActiveAccount(req, accountId);
   if (!account) {
@@ -66,20 +70,46 @@ export default async function handler(req, res) {
   try {
     const client = await getTelegramClient(account);
 
-    // ── Resolve which dialogs to scan ─────────────────────────────────────────
-    const dialogs = await client.getDialogs({ limit: 500 });
-    const allGroupDialogs = dialogs.filter((d) => d.isGroup || d.isChannel);
+    // ── 決定要掃哪些群組 ────────────────────────────────────────────────────────
 
-    let groupDialogs;
+    // 模式 A：前端傳入完整群組資料 → 直接用 InputPeer，不需要 getDialogs
+    if (groupsInfo) {
+      const groups = groupsInfo.split(',').map((g) => {
+        const parts = g.split(':');
+        return {
+          chatId: parts[0],
+          accessHash: parts[1] || '0',
+          chatType: parts[2] || 'channel',
+          chatTitle: parts[3] ? decodeURIComponent(parts[3]) : parts[0],
+        };
+      }).filter((g) => g.chatId);
+
+      send({ type: 'total_chats', count: groups.length });
+      let totalVideos = 0;
+      const searchLower = search.toLowerCase();
+
+      for (const group of groups) {
+        if (res.writableEnded) break;
+        send({ type: 'scanning', chat: group.chatTitle });
+        totalVideos += await scanGroup(client, group, minSec, maxSec, searchLower, send, account);
+      }
+
+      send({ type: 'done', total: totalVideos });
+      return;
+    }
+
+    // 模式 B：掃最近 maxGroups 個群組（全掃模式，速度和以前一樣）
+    const selectedChatIds = chatIds ? chatIds.split(',').filter(Boolean) : [];
+    const dialogs = await client.getDialogs({ limit: parseInt(maxGroups) + 20 });
+    let groupDialogs = dialogs.filter((d) => d.isGroup || d.isChannel);
+
     if (selectedChatIds.length > 0) {
-      // Only scan the groups the user has selected
-      groupDialogs = allGroupDialogs.filter((d) => {
+      groupDialogs = groupDialogs.filter((d) => {
         const id = d.entity?.id?.toString() || d.id?.toString();
         return selectedChatIds.includes(id);
       });
     } else {
-      // No filter — scan up to maxGroups
-      groupDialogs = allGroupDialogs.slice(0, parseInt(maxGroups));
+      groupDialogs = groupDialogs.slice(0, parseInt(maxGroups));
     }
 
     send({ type: 'total_chats', count: groupDialogs.length });
@@ -89,102 +119,95 @@ export default async function handler(req, res) {
 
     for (const dialog of groupDialogs) {
       if (res.writableEnded) break;
-
       const chatTitle = dialog.title || '';
       send({ type: 'scanning', chat: chatTitle });
 
-      try {
-        const entity = dialog.entity;
-        const chatId = entity?.id?.toString() || dialog.id?.toString();
-        const isChannel = entity?.className === 'Channel' || entity?.megagroup === true;
-        const chatType = isChannel ? 'channel' : 'chat';
-        const accessHash = entity?.accessHash?.toString() || '0';
+      const entity = dialog.entity;
+      const chatId = entity?.id?.toString() || dialog.id?.toString();
+      const isChannel = entity?.className === 'Channel' || entity?.megagroup === true;
+      const chatType = isChannel ? 'channel' : 'chat';
+      const accessHash = entity?.accessHash?.toString() || '0';
 
-        // ── Collect all videos from this group, dedup by filename ─────────────
-        // Key: fileName (or msgId if no filename) → keep latest by msg.date
-        const dedupMap = new Map();
-
-        for await (const msg of client.iterMessages(entity, {
-          limit: 200,
-          filter: new Api.InputMessagesFilterVideo(),
-        })) {
-          if (res.writableEnded) break;
-          if (!msg?.media?.document) continue;
-
-          const doc = msg.media.document;
-          if (!doc?.mimeType?.startsWith('video/')) continue;
-
-          let width = 0, height = 0, duration = 0, fileName = '';
-          for (const attr of doc.attributes || []) {
-            if (attr.className === 'DocumentAttributeVideo') {
-              width = attr.w || 0;
-              height = attr.h || 0;
-              duration = attr.duration || 0;
-            }
-            if (attr.className === 'DocumentAttributeFilename') {
-              fileName = attr.fileName || '';
-            }
-          }
-
-          // Duration filter
-          if (duration < minSec || duration > maxSec) continue;
-
-          const title = msg.message?.trim() || fileName || chatTitle;
-
-          // Search filter
-          if (searchLower) {
-            const haystack = `${title} ${chatTitle}`.toLowerCase();
-            if (!haystack.includes(searchLower)) continue;
-          }
-
-          const hasThumbnail = Array.isArray(doc.thumbs) && doc.thumbs.length > 0;
-
-          const video = {
-            id: `${chatId}_${msg.id}`,
-            msgId: msg.id,
-            chatId,
-            chatTitle,
-            chatType,
-            accessHash,
-            title,
-            fileName,
-            date: msg.date,
-            duration,
-            width,
-            height,
-            fileSize: Number(doc.size || 0),
-            mimeType: doc.mimeType || 'video/mp4',
-            hasThumbnail,
-            accountId: account.id,
-          };
-
-          // Dedup: use fileName as key (fallback to msgId if no filename)
-          const dedupKey = fileName ? `fn:${fileName}` : `id:${msg.id}`;
-          const existing = dedupMap.get(dedupKey);
-          if (!existing || msg.date > existing.date) {
-            dedupMap.set(dedupKey, video);
-          }
-        }
-
-        // Emit deduplicated videos for this group (sorted newest first)
-        const groupVideos = [...dedupMap.values()].sort((a, b) => b.date - a.date);
-        for (const video of groupVideos) {
-          if (res.writableEnded) break;
-          send({ type: 'video', video });
-          totalVideos++;
-        }
-      } catch {
-        // Skip inaccessible chats silently
-      }
+      totalVideos += await scanGroup(
+        client,
+        { chatId, accessHash, chatType, chatTitle },
+        minSec, maxSec, searchLower, send, account
+      );
     }
 
     send({ type: 'done', total: totalVideos });
+
   } catch (e) {
     send({ type: 'error', message: e.message });
   } finally {
     cleanup();
-    // Release the Telegram connection so thumb/stream requests in other Lambda
-    // instances can connect without getting AUTH_KEY_DUPLICATED.
     releaseTelegramClient(account).catch(() => {});
+  }
+}
+
+// ── 掃描單一群組，回傳影片數；含 dedup 邏輯 ──────────────────────────────────
+
+async function scanGroup(client, { chatId, accessHash, chatType, chatTitle }, minSec, maxSec, searchLower, send, account) {
+  try {
+    const peer = buildInputPeer(chatId, accessHash, chatType);
+    const dedupMap = new Map(); // fileName (or msgId) → latest video
+
+    for await (const msg of client.iterMessages(peer, {
+      limit: 200,
+      filter: new Api.InputMessagesFilterVideo(),
+    })) {
+      if (!msg?.media?.document) continue;
+      const doc = msg.media.document;
+      if (!doc?.mimeType?.startsWith('video/')) continue;
+
+      let width = 0, height = 0, duration = 0, fileName = '';
+      for (const attr of doc.attributes || []) {
+        if (attr.className === 'DocumentAttributeVideo') {
+          width = attr.w || 0; height = attr.h || 0; duration = attr.duration || 0;
+        }
+        if (attr.className === 'DocumentAttributeFilename') {
+          fileName = attr.fileName || '';
+        }
+      }
+
+      if (duration < minSec || duration > maxSec) continue;
+
+      const title = msg.message?.trim() || fileName || chatTitle;
+      if (searchLower) {
+        if (!`${title} ${chatTitle}`.toLowerCase().includes(searchLower)) continue;
+      }
+
+      const video = {
+        id: `${chatId}_${msg.id}`,
+        msgId: msg.id,
+        chatId,
+        chatTitle,
+        chatType,
+        accessHash,
+        title,
+        fileName,
+        date: msg.date,
+        duration,
+        width,
+        height,
+        fileSize: Number(doc.size || 0),
+        mimeType: doc.mimeType || 'video/mp4',
+        hasThumbnail: Array.isArray(doc.thumbs) && doc.thumbs.length > 0,
+        accountId: account.id,
+      };
+
+      const dedupKey = fileName ? `fn:${fileName}` : `id:${msg.id}`;
+      const existing = dedupMap.get(dedupKey);
+      if (!existing || msg.date > existing.date) {
+        dedupMap.set(dedupKey, video);
+      }
+    }
+
+    const sorted = [...dedupMap.values()].sort((a, b) => b.date - a.date);
+    for (const video of sorted) send({ type: 'video', video });
+    return sorted.length;
+
+  } catch {
+    return 0; // 略過無法存取的群組
   }
 }
