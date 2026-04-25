@@ -272,7 +272,7 @@ function LoginPage({ onLoggedIn }) {
 
 // ─── Video Card（支援長按加入最愛；防止上滑捲動誤觸播放）────────────────────
 
-function VideoCard({ video, onPlay, onLongPress, isWatched, isFav }) {
+function VideoCard({ video, onPlay, onLongPress, isWatched, isFav, thumbReady = true }) {
   const thumbSrc = `/api/thumb?chatId=${video.chatId}&msgId=${video.msgId}&accessHash=${video.accessHash}&chatType=${video.chatType}&accountId=${video.accountId}`;
   const [imgErr, setImgErr] = useState(false);
   const [hover, setHover] = useState(false);
@@ -354,7 +354,7 @@ function VideoCard({ video, onPlay, onLongPress, isWatched, isFav }) {
     >
       {/* Thumbnail */}
       <div style={{ position: 'relative', aspectRatio: '16/9', background: '#111113', overflow: 'hidden' }}>
-        {video.hasThumbnail && !imgErr ? (
+        {video.hasThumbnail && !imgErr && thumbReady ? (
           <img src={thumbSrc} alt="" onError={() => setImgErr(true)} loading="lazy"
             style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
         ) : (
@@ -507,6 +507,7 @@ export default function Home() {
   const [maxDuration, setMaxDuration] = useState(180);
   const [maxGroups, setMaxGroups] = useState(30);
   const [favIds, setFavIds] = useState(new Set());
+  const [scanDone, setScanDone] = useState(true);  // 掃描完成才載入縮圖，避免 AUTH_KEY_DUPLICATED
   const [selectedGroupIds, setSelectedGroupIds] = useState(null); // null = 全部, [] = 無
   const [toast, setToast] = useState('');
   const esRef = useRef(null);
@@ -548,6 +549,7 @@ export default function Home() {
     if (esRef.current) { esRef.current.close(); esRef.current = null; }
     setVideos([]);
     setScanning(true);
+    setScanDone(false);   // 重置：掃描期間不載入縮圖
     setScanStatus('連線中…');
 
     const accId = accountId || activeId;
@@ -574,6 +576,7 @@ export default function Home() {
         if (data.type === 'video') setVideos((v) => [...v, data.video].sort((a, b) => b.date - a.date));
         if (data.type === 'done') {
           setScanning(false); setScanStatus(''); es.close();
+          setScanDone(true);  // 掃描完成 → 開始載入縮圖（SSE 那端已 disconnect Telegram）
           // 掃描完成後更新已知群組清單
           setVideos((prev) => {
             const groupMap = new Map();
@@ -585,10 +588,10 @@ export default function Home() {
             return prev;
           });
         }
-        if (data.type === 'error') { setScanning(false); setScanStatus(`錯誤：${data.message}`); es.close(); }
+        if (data.type === 'error') { setScanning(false); setScanStatus(`錯誤：${data.message}`); es.close(); setScanDone(true); }
       } catch {}
     };
-    es.onerror = () => { setScanning(false); setScanStatus('連線中斷'); es.close(); };
+    es.onerror = () => { setScanning(false); setScanStatus('連線中斷'); es.close(); setScanDone(true); };
   }, [activeId, maxGroups, minDuration, maxDuration]);
 
   useEffect(() => {
@@ -859,6 +862,7 @@ export default function Home() {
                 onLongPress={handleLongPress}
                 isWatched={false}
                 isFav={favIds.has(v.id)}
+                thumbReady={scanDone}
               />
             </div>
           ))}

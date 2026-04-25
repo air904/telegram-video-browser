@@ -14,7 +14,7 @@
  * Dedup rule: within the same group, if multiple messages share the same
  * filename, only the most recent one is emitted.
  */
-import { getActiveAccount, getTelegramClient, bigIntReplacer } from '../../lib/telegram';
+import { getActiveAccount, getTelegramClient, releaseTelegramClient, bigIntReplacer } from '../../lib/telegram';
 import { Api } from 'telegram';
 
 export const config = { api: { responseLimit: false } };
@@ -183,5 +183,8 @@ export default async function handler(req, res) {
     send({ type: 'error', message: e.message });
   } finally {
     cleanup();
+    // Release the Telegram connection so thumb/stream requests in other Lambda
+    // instances can connect without getting AUTH_KEY_DUPLICATED.
+    releaseTelegramClient(account).catch(() => {});
   }
 }
