@@ -507,15 +507,18 @@ export default function Home() {
   const [maxDuration, setMaxDuration] = useState(180);
   const [maxGroups, setMaxGroups] = useState(30);
   const [favIds, setFavIds] = useState(new Set());
-  const [selectedGroupIds, setSelectedGroupIds] = useState(null); // null = 全部
+  const [selectedGroupIds, setSelectedGroupIds] = useState(null); // null = 全部, [] = 無
   const [toast, setToast] = useState('');
   const esRef = useRef(null);
   const searchTimer = useRef(null);
   const toastTimer = useRef(null);
+  const prevSelectedRef = useRef(null); // 追蹤上一次選擇，避免 focus 時無謂重掃
 
   // Load accounts + group selection on mount
   useEffect(() => {
-    setSelectedGroupIds(getSelectedGroupIds());
+    const ids = getSelectedGroupIds();
+    setSelectedGroupIds(ids);
+    prevSelectedRef.current = ids;
     (async () => {
       try {
         const data = await api('/api/accounts');
@@ -540,7 +543,8 @@ export default function Home() {
   };
 
   // Scan videos via SSE
-  const scanVideos = useCallback((searchQ = '', minD = minDuration, maxD = maxDuration, accountId) => {
+  // chatIds: string[] of chatId to restrict scan, null/undefined = use current selectedGroupIds
+  const scanVideos = useCallback((searchQ = '', minD = minDuration, maxD = maxDuration, accountId, chatIds) => {
     if (esRef.current) { esRef.current.close(); esRef.current = null; }
     setVideos([]);
     setScanning(true);
@@ -554,6 +558,11 @@ export default function Home() {
       minDuration: minD,
       maxDuration: maxD,
     });
+    // Pass selected group IDs so the server only scans those groups
+    const ids = chatIds !== undefined ? chatIds : selectedGroupIds;
+    if (ids && ids.length > 0) {
+      params.set('chatIds', ids.join(','));
+    }
     const es = new EventSource(`/api/videos?${params}`);
     esRef.current = es;
 
@@ -583,8 +592,13 @@ export default function Home() {
   }, [activeId, maxGroups, minDuration, maxDuration]);
 
   useEffect(() => {
-    if (view === 'main' && activeId) scanVideos('', minDuration, maxDuration, activeId);
-  }, [view, activeId]);
+    if (view === 'main' && activeId) {
+      // 若有選擇群組才掃描；若 selectedGroupIds 為 [] 則不掃描（等使用者去設定選群組）
+      if (selectedGroupIds === null || (selectedGroupIds && selectedGroupIds.length > 0)) {
+        scanVideos('', minDuration, maxDuration, activeId, selectedGroupIds);
+      }
+    }
+  }, [view, activeId]); // eslint-disable-line
 
   // Debounced search
   const handleSearch = (val) => {
@@ -660,16 +674,33 @@ export default function Home() {
     } catch {}
   }, []);
 
-  // 從設定頁返回時重新讀取群組選擇
+  // 從設定頁返回時重新讀取群組選擇，若有變化才重掃
   useEffect(() => {
-    const onFocus = () => setSelectedGroupIds(getSelectedGroupIds());
+    const onFocus = () => {
+      const newIds = getSelectedGroupIds();
+      const prev = prevSelectedRef.current;
+      const changed = JSON.stringify(prev) !== JSON.stringify(newIds);
+      if (changed) {
+        setSelectedGroupIds(newIds);
+        prevSelectedRef.current = newIds;
+        if (view === 'main' && activeId) {
+          if (newIds === null || newIds.length > 0) {
+            scanVideos('', minDuration, maxDuration, activeId, newIds);
+          } else {
+            // 全不選 → 清空畫面，不掃描
+            if (esRef.current) { esRef.current.close(); esRef.current = null; }
+            setVideos([]);
+            setScanning(false);
+          }
+        }
+      }
+    };
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
-  }, []);
+  }, [view, activeId, minDuration, maxDuration, scanVideos]);
 
-  // Client-side filter：群組篩選 + 搜尋
+  // Client-side filter：只剩搜尋（群組已由 server-side 過濾）
   const filteredVideos = videos.filter((v) => {
-    if (selectedGroupIds !== null && !selectedGroupIds.includes(v.chatId)) return false;
     if (search) {
       const q = search.toLowerCase();
       return (v.title || '').toLowerCase().includes(q) || (v.chatTitle || '').toLowerCase().includes(q);
@@ -767,9 +798,14 @@ export default function Home() {
           <span style={{ color: '#71717a', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {scanning ? scanStatus : `共 ${filteredVideos.length} 支影片`}
           </span>
-          {!scanning && selectedGroupIds !== null && (
+          {!scanning && selectedGroupIds !== null && selectedGroupIds.length > 0 && (
             <span style={{ fontSize: 10, background: '#7c3aed22', color: '#a78bfa', borderRadius: 10, padding: '2px 7px', flexShrink: 0, whiteSpace: 'nowrap' }}>
               {selectedGroupIds.length} 群組篩選中
+            </span>
+          )}
+          {!scanning && selectedGroupIds !== null && selectedGroupIds.length === 0 && (
+            <span style={{ fontSize: 10, background: '#ef444422', color: '#fca5a5', borderRadius: 10, padding: '2px 7px', flexShrink: 0, whiteSpace: 'nowrap' }}>
+              未選群組
             </span>
           )}
         </div>
@@ -789,7 +825,20 @@ export default function Home() {
 
       {/* ── Video Grid ── */}
       <main style={{ padding: '16px', paddingBottom: 80, minHeight: 'calc(100vh - 110px)' }}>
-        {filteredVideos.length === 0 && !scanning && (
+
+        {/* 未選群組的引導畫面 */}
+        {selectedGroupIds !== null && selectedGroupIds.length === 0 && !scanning && (
+          <div style={{ textAlign: 'center', padding: '80px 20px', color: '#52525b' }}>
+            <div style={{ fontSize: 56, marginBottom: 16 }}>📡</div>
+            <p style={{ fontSize: 18, fontWeight: 600, color: '#3f3f46' }}>尚未選擇任何群組</p>
+            <p style={{ marginTop: 8, fontSize: 13 }}>請先到設定頁選擇要顯示的群組</p>
+            <Link href="/settings" style={{ display: 'inline-block', marginTop: 24, padding: '10px 24px', background: '#7c3aed', color: '#fff', borderRadius: 8, fontSize: 14, fontWeight: 600, textDecoration: 'none' }}>
+              ⚙️ 前往設定
+            </Link>
+          </div>
+        )}
+
+        {filteredVideos.length === 0 && !scanning && (selectedGroupIds === null || selectedGroupIds.length > 0) && (
           <div style={{ textAlign: 'center', padding: '80px 20px', color: '#52525b' }}>
             <div style={{ fontSize: 56, marginBottom: 16 }}>🎬</div>
             <p style={{ fontSize: 18, fontWeight: 600, color: '#3f3f46' }}>

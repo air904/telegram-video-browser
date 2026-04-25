@@ -1,11 +1,18 @@
 /**
- * GET /api/videos?search=&maxGroups=30&accountId=&minDuration=10&maxDuration=180
+ * GET /api/videos
+ *   ?search=&accountId=&minDuration=10&maxDuration=180
+ *   &chatIds=id1,id2,id3   ← only scan these groups (omit = scan all)
+ *   &maxGroups=30           ← limit when scanning all groups
  *
- * Server-Sent Events stream. Each event is a JSON object:
- *   { type: 'scanning', chat: '...' }
- *   { type: 'video', video: { ... } }
- *   { type: 'done', total: N }
- *   { type: 'error', message: '...' }
+ * Server-Sent Events stream:
+ *   { type: 'total_chats', count }
+ *   { type: 'scanning', chat }
+ *   { type: 'video', video }
+ *   { type: 'done', total }
+ *   { type: 'error', message }
+ *
+ * Dedup rule: within the same group, if multiple messages share the same
+ * filename, only the most recent one is emitted.
  */
 import { getActiveAccount, getTelegramClient, bigIntReplacer } from '../../lib/telegram';
 import { Api } from 'telegram';
@@ -13,20 +20,30 @@ import { Api } from 'telegram';
 export const config = { api: { responseLimit: false } };
 
 export default async function handler(req, res) {
-  const { search = '', maxGroups = '30', accountId, minDuration = '10', maxDuration = '180' } = req.query;
+  const {
+    search = '',
+    maxGroups = '30',
+    accountId,
+    minDuration = '10',
+    maxDuration = '180',
+    chatIds = '',           // comma-separated chatId strings, empty = scan all
+  } = req.query;
+
   const minSec = parseInt(minDuration) || 0;
   const maxSec = parseInt(maxDuration) || Infinity;
+  const selectedChatIds = chatIds ? chatIds.split(',').filter(Boolean) : [];
+
   const account = getActiveAccount(req, accountId);
   if (!account) {
     res.status(401).json({ error: 'Not authenticated' });
     return;
   }
 
-  // Set up SSE
+  // ── SSE setup ──────────────────────────────────────────────────────────────
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no'); // Disable Nginx buffering
+  res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders?.();
 
   const send = (obj) => {
@@ -35,7 +52,6 @@ export default async function handler(req, res) {
     }
   };
 
-  // Keep-alive ping every 20s so the connection isn't closed
   const pingInterval = setInterval(() => {
     if (!res.writableEnded) res.write(': ping\n\n');
   }, 20_000);
@@ -49,12 +65,22 @@ export default async function handler(req, res) {
 
   try {
     const client = await getTelegramClient(account);
-    const dialogs = await client.getDialogs({ limit: parseInt(maxGroups) + 20 });
 
-    // Filter to groups and channels only
-    const groupDialogs = dialogs
-      .filter((d) => d.isGroup || d.isChannel)
-      .slice(0, parseInt(maxGroups));
+    // ── Resolve which dialogs to scan ─────────────────────────────────────────
+    const dialogs = await client.getDialogs({ limit: 500 });
+    const allGroupDialogs = dialogs.filter((d) => d.isGroup || d.isChannel);
+
+    let groupDialogs;
+    if (selectedChatIds.length > 0) {
+      // Only scan the groups the user has selected
+      groupDialogs = allGroupDialogs.filter((d) => {
+        const id = d.entity?.id?.toString() || d.id?.toString();
+        return selectedChatIds.includes(id);
+      });
+    } else {
+      // No filter — scan up to maxGroups
+      groupDialogs = allGroupDialogs.slice(0, parseInt(maxGroups));
+    }
 
     send({ type: 'total_chats', count: groupDialogs.length });
 
@@ -68,13 +94,15 @@ export default async function handler(req, res) {
       send({ type: 'scanning', chat: chatTitle });
 
       try {
-        // Determine entity metadata for later peer reconstruction
         const entity = dialog.entity;
         const chatId = entity?.id?.toString() || dialog.id?.toString();
-        const isChannel =
-          entity?.className === 'Channel' || entity?.megagroup === true;
+        const isChannel = entity?.className === 'Channel' || entity?.megagroup === true;
         const chatType = isChannel ? 'channel' : 'chat';
         const accessHash = entity?.accessHash?.toString() || '0';
+
+        // ── Collect all videos from this group, dedup by filename ─────────────
+        // Key: fileName (or msgId if no filename) → keep latest by msg.date
+        const dedupMap = new Map();
 
         for await (const msg of client.iterMessages(entity, {
           limit: 200,
@@ -86,11 +114,7 @@ export default async function handler(req, res) {
           const doc = msg.media.document;
           if (!doc?.mimeType?.startsWith('video/')) continue;
 
-          // Extract video attributes
-          let width = 0,
-            height = 0,
-            duration = 0,
-            fileName = '';
+          let width = 0, height = 0, duration = 0, fileName = '';
           for (const attr of doc.attributes || []) {
             if (attr.className === 'DocumentAttributeVideo') {
               width = attr.w || 0;
@@ -102,19 +126,18 @@ export default async function handler(req, res) {
             }
           }
 
-          const title = msg.message?.trim() || fileName || chatTitle;
-
-          // Apply search filter
-          // 時長過濾（伺服器端）
+          // Duration filter
           if (duration < minSec || duration > maxSec) continue;
 
+          const title = msg.message?.trim() || fileName || chatTitle;
+
+          // Search filter
           if (searchLower) {
             const haystack = `${title} ${chatTitle}`.toLowerCase();
             if (!haystack.includes(searchLower)) continue;
           }
 
-          const hasThumbnail =
-            Array.isArray(doc.thumbs) && doc.thumbs.length > 0;
+          const hasThumbnail = Array.isArray(doc.thumbs) && doc.thumbs.length > 0;
 
           const video = {
             id: `${chatId}_${msg.id}`,
@@ -124,6 +147,7 @@ export default async function handler(req, res) {
             chatType,
             accessHash,
             title,
+            fileName,
             date: msg.date,
             duration,
             width,
@@ -134,6 +158,18 @@ export default async function handler(req, res) {
             accountId: account.id,
           };
 
+          // Dedup: use fileName as key (fallback to msgId if no filename)
+          const dedupKey = fileName ? `fn:${fileName}` : `id:${msg.id}`;
+          const existing = dedupMap.get(dedupKey);
+          if (!existing || msg.date > existing.date) {
+            dedupMap.set(dedupKey, video);
+          }
+        }
+
+        // Emit deduplicated videos for this group (sorted newest first)
+        const groupVideos = [...dedupMap.values()].sort((a, b) => b.date - a.date);
+        for (const video of groupVideos) {
+          if (res.writableEnded) break;
           send({ type: 'video', video });
           totalVideos++;
         }
