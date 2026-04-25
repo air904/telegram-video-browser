@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/router';
 import Head from 'next/head';
 import Link from 'next/link';
-import { toggleFavorite, isFavorite, addWatched, savePlaylist } from '../lib/storage';
+import { toggleFavorite, isFavorite, addWatched, savePlaylist, getKnownGroups, saveKnownGroups, getSelectedGroupIds } from '../lib/storage';
 
 // ─── 硬編碼 API 憑證（直接寫入，無需登入時手動輸入）─────────────────────────
 const HARDCODED_API_ID = '39092753';
@@ -78,6 +78,7 @@ function NavBar({ active }) {
   const items = [
     { href: '/', icon: '🏠', label: '首頁', key: 'home' },
     { href: '/favorites', icon: '❤️', label: '最愛', key: 'favorites' },
+    { href: '/settings', icon: '⚙️', label: '設定', key: 'settings' },
   ];
   return (
     <nav style={{ position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 100, background: 'rgba(13,13,15,0.96)', backdropFilter: 'blur(14px)', borderTop: '1px solid #1f1f23', display: 'flex', height: 58 }}>
@@ -269,7 +270,7 @@ function LoginPage({ onLoggedIn }) {
   );
 }
 
-// ─── Video Card（支援長按加入最愛、已瀏覽標記）──────────────────────────────
+// ─── Video Card（支援長按加入最愛；防止上滑捲動誤觸播放）────────────────────
 
 function VideoCard({ video, onPlay, onLongPress, isWatched, isFav }) {
   const thumbSrc = `/api/thumb?chatId=${video.chatId}&msgId=${video.msgId}&accessHash=${video.accessHash}&chatType=${video.chatType}&accountId=${video.accountId}`;
@@ -278,30 +279,55 @@ function VideoCard({ video, onPlay, onLongPress, isWatched, isFav }) {
   const [pressing, setPressing] = useState(false);
   const pressTimer = useRef(null);
   const didLongPress = useRef(false);
+  const didMove = useRef(false);        // 是否偵測到移動（捲動）
+  const touchOrigin = useRef(null);     // 記錄觸控起始座標
 
-  function startPress() {
+  function startPress(e) {
     didLongPress.current = false;
+    didMove.current = false;
+    if (e?.touches) {
+      touchOrigin.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    }
     setPressing(true);
     pressTimer.current = setTimeout(() => {
-      didLongPress.current = true;
-      setPressing(false);
-      onLongPress(video);
+      if (!didMove.current) {
+        didLongPress.current = true;
+        setPressing(false);
+        onLongPress(video);
+      }
     }, 600);
+  }
+
+  function handleTouchMove(e) {
+    if (!touchOrigin.current) return;
+    const dx = Math.abs(e.touches[0].clientX - touchOrigin.current.x);
+    const dy = Math.abs(e.touches[0].clientY - touchOrigin.current.y);
+    // 移動超過 10px 就視為捲動，取消播放
+    if (dx > 10 || dy > 10) {
+      didMove.current = true;
+      clearTimeout(pressTimer.current);
+      setPressing(false);
+    }
   }
 
   function endPress() {
     clearTimeout(pressTimer.current);
     setPressing(false);
-    if (!didLongPress.current) {
+    // 沒有移動且非長按 → 才觸發播放
+    if (!didLongPress.current && !didMove.current) {
       onPlay(video);
     }
     didLongPress.current = false;
+    didMove.current = false;
+    touchOrigin.current = null;
   }
 
   function cancelPress() {
     clearTimeout(pressTimer.current);
     setPressing(false);
     didLongPress.current = false;
+    didMove.current = false;
+    touchOrigin.current = null;
   }
 
   return (
@@ -310,8 +336,9 @@ function VideoCard({ video, onPlay, onLongPress, isWatched, isFav }) {
       onMouseLeave={() => { setHover(false); cancelPress(); }}
       onMouseDown={startPress}
       onMouseUp={endPress}
-      onTouchStart={(e) => { e.preventDefault(); startPress(); }}
-      onTouchEnd={(e) => { e.preventDefault(); endPress(); }}
+      onTouchStart={startPress}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={endPress}
       onTouchCancel={cancelPress}
       style={{
         background: hover ? '#27272b' : '#1f1f23',
@@ -480,13 +507,15 @@ export default function Home() {
   const [maxDuration, setMaxDuration] = useState(180);
   const [maxGroups, setMaxGroups] = useState(30);
   const [favIds, setFavIds] = useState(new Set());
+  const [selectedGroupIds, setSelectedGroupIds] = useState(null); // null = 全部
   const [toast, setToast] = useState('');
   const esRef = useRef(null);
   const searchTimer = useRef(null);
   const toastTimer = useRef(null);
 
-  // Load accounts on mount
+  // Load accounts + group selection on mount
   useEffect(() => {
+    setSelectedGroupIds(getSelectedGroupIds());
     (async () => {
       try {
         const data = await api('/api/accounts');
@@ -534,7 +563,19 @@ export default function Home() {
         if (data.type === 'total_chats') setScanStatus(`掃描 ${data.count} 個群組中…`);
         if (data.type === 'scanning') setScanStatus(`掃描：${data.chat}`);
         if (data.type === 'video') setVideos((v) => [...v, data.video].sort((a, b) => b.date - a.date));
-        if (data.type === 'done') { setScanning(false); setScanStatus(''); es.close(); }
+        if (data.type === 'done') {
+          setScanning(false); setScanStatus(''); es.close();
+          // 掃描完成後更新已知群組清單
+          setVideos((prev) => {
+            const groupMap = new Map();
+            prev.forEach((v) => {
+              if (!groupMap.has(v.chatId)) groupMap.set(v.chatId, { chatId: v.chatId, chatTitle: v.chatTitle, count: 0 });
+              groupMap.get(v.chatId).count++;
+            });
+            saveKnownGroups([...groupMap.values()].sort((a, b) => b.count - a.count));
+            return prev;
+          });
+        }
         if (data.type === 'error') { setScanning(false); setScanStatus(`錯誤：${data.message}`); es.close(); }
       } catch {}
     };
@@ -619,13 +660,22 @@ export default function Home() {
     } catch {}
   }, []);
 
-  // Client-side search filter
-  const filteredVideos = search
-    ? videos.filter((v) => {
-        const q = search.toLowerCase();
-        return (v.title || '').toLowerCase().includes(q) || (v.chatTitle || '').toLowerCase().includes(q);
-      })
-    : videos;
+  // 從設定頁返回時重新讀取群組選擇
+  useEffect(() => {
+    const onFocus = () => setSelectedGroupIds(getSelectedGroupIds());
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, []);
+
+  // Client-side filter：群組篩選 + 搜尋
+  const filteredVideos = videos.filter((v) => {
+    if (selectedGroupIds !== null && !selectedGroupIds.includes(v.chatId)) return false;
+    if (search) {
+      const q = search.toLowerCase();
+      return (v.title || '').toLowerCase().includes(q) || (v.chatTitle || '').toLowerCase().includes(q);
+    }
+    return true;
+  });
 
   // ─── Render ───────────────────────────────────────────────────────────────
 
@@ -679,7 +729,10 @@ export default function Home() {
 
       {/* ── Header ── */}
       <header style={{ position: 'sticky', top: 0, zIndex: 50, background: 'rgba(13,13,15,0.9)', backdropFilter: 'blur(14px)', borderBottom: '1px solid #1f1f23', padding: '0 16px', display: 'flex', alignItems: 'center', gap: 12, height: 58 }}>
-        <span style={{ fontSize: 22, flexShrink: 0 }}>📺</span>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flexShrink: 0 }}>
+          <span style={{ fontSize: 22, lineHeight: 1 }}>📺</span>
+          <span style={{ fontSize: 9, color: '#52525b', letterSpacing: '0.02em' }}>v1.0</span>
+        </div>
 
         {/* Search */}
         <div style={{ flex: 1, position: 'relative', maxWidth: 520 }}>
@@ -714,6 +767,11 @@ export default function Home() {
           <span style={{ color: '#71717a', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {scanning ? scanStatus : `共 ${filteredVideos.length} 支影片`}
           </span>
+          {!scanning && selectedGroupIds !== null && (
+            <span style={{ fontSize: 10, background: '#7c3aed22', color: '#a78bfa', borderRadius: 10, padding: '2px 7px', flexShrink: 0, whiteSpace: 'nowrap' }}>
+              {selectedGroupIds.length} 群組篩選中
+            </span>
+          )}
         </div>
 
         {/* Duration filter */}
