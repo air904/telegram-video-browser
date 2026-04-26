@@ -50,9 +50,16 @@ function Spinner({ size = 16 }) {
   );
 }
 
+// 將可能是物件的 title 安全轉為字串（防止舊快取中殘留 TextWithEntities 物件）
+function safeStr(v) {
+  if (typeof v === 'string') return v;
+  if (v && typeof v === 'object' && typeof v.text === 'string') return v.text;
+  return '';
+}
+
 function FolderIcon({ title }) {
-  if (!title) return <>📁</>;
-  const t = title.toLowerCase();
+  const t = safeStr(title).toLowerCase();
+  if (!t) return <>📁</>;
   if (t === '所有聊天' || t === 'all chats') return <>💬</>;
   if (t.includes('personal') || t.includes('個人'))  return <>👤</>;
   if (t.includes('unread')   || t.includes('未讀'))  return <>🔔</>;
@@ -360,7 +367,7 @@ export default function SettingsPage() {
                         <p style={{ fontWeight: 600, fontSize: 15,
                           color: isSelected ? '#c4b5fd' : '#d4d4d8',
                           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {folder.title}
+                          {safeStr(folder.title) || `文件夾 ${folder.id}`}
                         </p>
                         {isSelected && summary && (
                           <p style={{ fontSize: 11, color: '#7c3aed', marginTop: 2 }}>
@@ -467,7 +474,7 @@ export default function SettingsPage() {
             <p style={{ fontSize: 11, color: '#52525b', marginTop: 10, textAlign: 'center' }}>
               已選：
               <span style={{ color: '#a78bfa' }}>
-                {folders.find(f => f.id === selFolderId)?.title || `文件夾 ${selFolderId}`}
+                {safeStr(folders.find(f => f.id === selFolderId)?.title) || `文件夾 ${selFolderId}`}
               </span>
               {' → '}
               <span style={{ color: '#a78bfa' }}>{getSelectionSummary(selFolderId)}</span>
