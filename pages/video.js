@@ -254,21 +254,21 @@ export default function VideoPage() {
   const handleTouchStart = useCallback((e) => {
     touchStartY.current = e.touches[0].clientY;
     touchStartX.current = e.touches[0].clientX;
-
-    // 長按計時（500ms）
     clearTimeout(longPressTimer.current);
-    longPressTimer.current = setTimeout(() => {
-      const vid = videoRef.current;
-      if (!vid) return;
 
-      // 以影片「容器 div」的範圍判斷上下半（比 video 元素本身更準確）
-      const container = videoContainerRef.current || vid;
-      const rect = container.getBoundingClientRect();
-      const ty = touchStartY.current, tx = touchStartX.current;
-      if (tx < rect.left || tx > rect.right || ty < rect.top || ty > rect.bottom) return;
+    // 在 touchstart 時就判斷上下半部，分別設定不同計時
+    const container = videoContainerRef.current;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+    const ty = e.touches[0].clientY;
+    const tx = e.touches[0].clientX;
 
-      if (ty < rect.top + rect.height / 2) {
-        // ── 上半部：儲存 / 取消最愛 ──────────────────────────────────────
+    // 確認按壓在影片容器範圍內
+    if (tx < rect.left || tx > rect.right || ty < rect.top || ty > rect.bottom) return;
+
+    if (ty < rect.top + rect.height / 2) {
+      // ── 上半部：長按 5 秒 → 儲存 / 取消最愛 ────────────────────────────
+      longPressTimer.current = setTimeout(() => {
         if (!videoId) return;
         const video = {
           id: videoId, chatId, msgId, accessHash, chatType,
@@ -280,13 +280,17 @@ export default function VideoPage() {
         const added = toggleFavorite(video);
         setFav(added);
         showToast(added ? '❤️ 長按儲存影片' : '🤍 已從最愛移除');
-      } else {
-        // ── 下半部：2x 快速播放 ───────────────────────────────────────────
+      }, 5000); // 5 秒
+    } else {
+      // ── 下半部：長按 500ms → 2x 快速播放 ──────────────────────────────
+      longPressTimer.current = setTimeout(() => {
+        const vid = videoRef.current;
+        if (!vid) return;
         is2xMode.current = true;
         vid.playbackRate = 2;
         setSpeedHint(true);
-      }
-    }, 500);
+      }, 500); // 0.5 秒
+    }
   }, [videoId, chatId, msgId, accessHash, chatType, mimeType, accountId,   // eslint-disable-line
       title, chatTitle, date, duration, fileSize, hasThumbnail, showToast]); // eslint-disable-line
 
