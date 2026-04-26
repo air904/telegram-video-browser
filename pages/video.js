@@ -263,7 +263,9 @@ export default function VideoPage() {
               controls
               autoPlay
               playsInline
+              preload="auto"
               onEnded={handleEnded}
+              onWaiting={() => {}}
               style={{ width: '100%', maxHeight: '75vh', display: 'block' }}
             />
           ) : (
