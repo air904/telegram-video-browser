@@ -225,6 +225,12 @@ async function scanGroup(
         mimeType: doc.mimeType || 'video/mp4',
         hasThumbnail: Array.isArray(doc.thumbs) && doc.thumbs.length > 0,
         accountId: account.id,
+        // doc metadata — 讓 stream.js 可跳過 getMessages()，直接開始下載
+        docId:          doc.id?.toString()        || '',
+        docAccessHash:  doc.accessHash?.toString() || '',
+        docFileRef:     doc.fileReference
+                          ? Buffer.from(doc.fileReference).toString('base64')
+                          : '',
       };
 
       const dedupKey = fileName ? `fn:${fileName}` : `id:${msg.id}`;

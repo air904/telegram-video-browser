@@ -51,6 +51,7 @@ export default function VideoPage() {
   const {
     chatId, msgId, accessHash, chatType, mimeType, accountId,
     title, chatTitle, date, duration, fileSize, hasThumbnail,
+    docId, docAccessHash, docFileRef,
   } = query;
 
   const [fav, setFav] = useState(false);
@@ -112,6 +113,8 @@ export default function VideoPage() {
       title: video.title || '', chatTitle: video.chatTitle || '',
       date: video.date || 0, duration: video.duration || 0,
       fileSize: video.fileSize || 0, hasThumbnail: video.hasThumbnail ? 'true' : 'false',
+      docId: video.docId || '', docAccessHash: video.docAccessHash || '',
+      docFileRef: video.docFileRef || '',
     });
     router.replace(`/video?${p}`);
   }, [router]);
@@ -196,7 +199,12 @@ export default function VideoPage() {
   };
 
   const streamUrl = chatId
-    ? `/api/stream?chatId=${chatId}&msgId=${msgId}&accessHash=${encodeURIComponent(accessHash||'')}&chatType=${chatType}&mimeType=${encodeURIComponent(mimeType||'video/mp4')}&accountId=${accountId}`
+    ? `/api/stream?chatId=${chatId}&msgId=${msgId}&accessHash=${encodeURIComponent(accessHash||'')}` +
+      `&chatType=${chatType}&mimeType=${encodeURIComponent(mimeType||'video/mp4')}&accountId=${accountId}` +
+      `&fileSize=${fileSize||0}` +
+      `&docId=${encodeURIComponent(docId||'')}` +
+      `&docAccessHash=${encodeURIComponent(docAccessHash||'')}` +
+      `&docFileRef=${encodeURIComponent(docFileRef||'')}`
     : '';
 
   const isReady = !!chatId;

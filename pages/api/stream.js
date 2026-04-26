@@ -20,7 +20,11 @@ const PART_SIZE  = 1024 * 1024;      // 1 MB — MTProto 單次下載上限
 const CHUNK_SIZE = 8 * 1024 * 1024;  // 8 MB — 每次 HTTP response 上限
 
 export default async function handler(req, res) {
-  const { chatId, msgId, accessHash, chatType, mimeType = 'video/mp4', accountId } = req.query;
+  const {
+    chatId, msgId, accessHash, chatType, mimeType = 'video/mp4', accountId,
+    fileSize: fileSizeParam,
+    docId, docAccessHash, docFileRef,
+  } = req.query;
 
   // ── 認證檢查 ────────────────────────────────────────────────────────────────
   const account = getActiveAccount(req, accountId);
@@ -32,16 +36,39 @@ export default async function handler(req, res) {
   try {
     const { Api } = require('telegram');
     const client = await getTelegramClient(account);
-    const peer   = buildInputPeer(chatId, accessHash, chatType);
 
-    // ── 取得訊息（只需 doc metadata，不下載影片本體）────────────────────────
-    const msgs = await client.getMessages(peer, { ids: [parseInt(msgId)] });
-    const msg  = msgs?.[0];
-    if (!msg?.media?.document) return res.status(404).end('Video not found');
+    // ── Doc metadata 取得（兩條路徑）────────────────────────────────────────
+    // 快速路徑：掃描時已取得 doc 資訊，直接組 InputDocumentFileLocation
+    //   → 省去一次 getMessages() Telegram round-trip（節省 500-2000ms）
+    // 慢速路徑：沒有 doc 資訊（舊版收藏/直接連結）→ 呼叫 getMessages fallback
+    let doc, fileSize, contentType;
 
-    const doc         = msg.media.document;
-    const fileSize    = Number(doc.size || 0);
-    const contentType = doc.mimeType || mimeType;
+    if (docId && docAccessHash && docFileRef) {
+      // ── 快速路徑 ──────────────────────────────────────────────────────────
+      try {
+        doc = {
+          id:            bigInt(docId),
+          accessHash:    bigInt(docAccessHash),
+          fileReference: Buffer.from(decodeURIComponent(docFileRef), 'base64'),
+        };
+        fileSize    = parseInt(fileSizeParam) || 0;
+        contentType = mimeType;
+      } catch (parseErr) {
+        console.warn('[stream] fast-path parse failed, falling back:', parseErr.message);
+        doc = null;
+      }
+    }
+
+    if (!doc) {
+      // ── 慢速路徑（fallback）────────────────────────────────────────────────
+      const peer = buildInputPeer(chatId, accessHash, chatType);
+      const msgs = await client.getMessages(peer, { ids: [parseInt(msgId)] });
+      const msg  = msgs?.[0];
+      if (!msg?.media?.document) return res.status(404).end('Video not found');
+      doc         = msg.media.document;
+      fileSize    = Number(doc.size || 0);
+      contentType = doc.mimeType || mimeType;
+    }
 
     // ── 解析 Range header ─────────────────────────────────────────────────────
     const rangeHeader = req.headers.range;

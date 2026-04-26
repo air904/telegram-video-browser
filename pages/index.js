@@ -681,6 +681,9 @@ export default function Home() {
       title: video.title||'', chatTitle: video.chatTitle||'',
       date: video.date||0, duration: video.duration||0,
       fileSize: video.fileSize||0, hasThumbnail: video.hasThumbnail?'true':'false',
+      // doc metadata — stream.js 用來跳過 getMessages()
+      docId: video.docId||'', docAccessHash: video.docAccessHash||'',
+      docFileRef: video.docFileRef||'',
     });
     router.push(`/video?${p}`);
   }
