@@ -24,6 +24,10 @@
     "pages/api/groups.js": {
       "maxDuration": 60,
       "memory": 512
+    },
+    "pages/api/folders.js": {
+      "maxDuration": 30,
+      "memory": 512
     }
   }
 }

@@ -4,8 +4,9 @@ import Head from 'next/head';
 import Link from 'next/link';
 import {
   toggleFavorite, addWatched, savePlaylist,
-  getKnownGroups, saveKnownGroups,
-  getSelectedGroupIds,
+  getKnownFolders, saveKnownFolders,
+  getSelectedFolderId, saveSelectedFolderId,
+  getFolderGroups, saveFolderGroups,
   saveCachedVideos, getCachedVideos, clearCachedVideos,
 } from '../lib/storage';
 
@@ -425,13 +426,13 @@ export default function Home() {
 
   // ── 其他 ──────────────────────────────────────────────────────────────────
   const [favIds, setFavIds]               = useState(new Set());
-  const [selectedGroupIds, setSelectedGroupIds] = useState(null);
+  const [selectedFolderId, setSelectedFolderId] = useState(null); // null=未選, 0=全部, N=指定文件夾
   const [toast, setToast]                 = useState('');
 
   const esRef           = useRef(null);
   const toastTimer      = useRef(null);
-  const prevSelectedRef = useRef(null);
-  const pendingRef      = useRef([]);       // 掃描期間累積，done 時 atomic replace
+  const prevFolderRef   = useRef(undefined); // 追蹤上次文件夾選擇
+  const pendingRef      = useRef([]);         // 掃描期間累積，done 時 atomic replace
 
   // ── displayVideos：allVideos 套上所有 client-side filter ──────────────────
   const displayVideos = useMemo(() => {
@@ -468,9 +469,9 @@ export default function Home() {
     toastTimer.current = setTimeout(() => setToast(''), 2000);
   };
 
-  // ── doScan：掃描選定群組，永遠以最大量取回（200支/群，不限天數）────────
-  // displayVideos 的 days / videosPerGroup 只做 client-side display filter
-  const doScan = useCallback((accountId, overrideIds) => {
+  // ── doScan：依選定文件夾掃描，永遠以最大量取回（200支/群，不限天數）────
+  // displayVideos 的 days / videosPerGroup / duration 只做 client-side display filter
+  const doScan = useCallback((accountId, folderId) => {
     clearCachedVideos();
     if (esRef.current) { esRef.current.close(); esRef.current = null; }
     pendingRef.current = [];
@@ -478,8 +479,8 @@ export default function Home() {
     setScanDone(false);
     setScanStatus('連線中…');
 
-    const accId = accountId || activeId;
-    const ids   = overrideIds !== undefined ? overrideIds : selectedGroupIds;
+    const accId    = accountId || activeId;
+    const folderToScan = folderId !== undefined ? folderId : selectedFolderId;
 
     // 永遠以最大設定掃，display filter 再縮小
     const params = new URLSearchParams({
@@ -490,12 +491,11 @@ export default function Home() {
       maxDuration: 99999,
     });
 
-    if (ids && ids.length > 0) {
-      // 模式 A：用已知群組的 accessHash 直接建 peer，跳過 getDialogs
-      const knownGroups = getKnownGroups();
-      const details = knownGroups.filter(g => ids.includes(g.chatId));
-      if (details.length > 0) {
-        const groupsInfo = details.map(g => [
+    // 模式 A：若有文件夾的群組快取，直接建 InputPeer 跳過 getDialogs
+    if (folderToScan !== null && folderToScan !== undefined) {
+      const cachedGroups = getFolderGroups(folderToScan);
+      if (cachedGroups && cachedGroups.length > 0) {
+        const groupsInfo = cachedGroups.map(g => [
           g.chatId,
           g.accessHash || '0',
           g.chatType || 'channel',
@@ -503,10 +503,11 @@ export default function Home() {
         ].join(':')).join(',');
         params.set('groupsInfo', groupsInfo);
       } else {
-        params.set('chatIds', ids.join(','));
+        // 模式 B：傳 folderId 給 server，由 server 呼叫 getDialogs(folder=N)
+        params.set('folderId', String(folderToScan));
       }
     }
-    // ids === null → 不限群組（模式 B，掃前 30 個對話）
+    // folderToScan === null → 不掃（不應發生，按鈕已 disabled）
 
     const es = new EventSource(`/api/videos?${params}`);
     esRef.current = es;
@@ -518,30 +519,27 @@ export default function Home() {
         if (msg.type === 'scanning')    setScanStatus(`掃描：${msg.chat}`);
         if (msg.type === 'video') {
           // 累積在 pendingRef，不動 allVideos，掃描期間舊清單繼續顯示
-          const sorted = [...pendingRef.current, msg.video].sort((a,b) => b.date - a.date);
-          pendingRef.current = sorted;
+          pendingRef.current = [...pendingRef.current, msg.video].sort((a, b) => b.date - a.date);
         }
         if (msg.type === 'done') {
           const final = pendingRef.current;
           setAllVideos(final);
           setScanning(false); setScanStatus(''); es.close();
           setScanDone(true);
-          // 儲存快取（key = 選定的群組 ID JSON）
-          saveCachedVideos(final, JSON.stringify(ids));
-          // 更新已知群組影片數量
-          const groupMap = new Map();
-          final.forEach(v => {
-            if (!groupMap.has(v.chatId))
-              groupMap.set(v.chatId, { chatId: v.chatId, chatTitle: v.chatTitle, chatType: v.chatType, accessHash: v.accessHash, count: 0 });
-            groupMap.get(v.chatId).count++;
-          });
-          if (groupMap.size > 0) {
-            const existing = getKnownGroups();
-            const existingMap = new Map(existing.map(g => [g.chatId, g]));
-            groupMap.forEach((g, id) => {
-              if (existingMap.has(id)) existingMap.get(id).count = g.count;
+          // 儲存快取（key = 文件夾 ID）
+          saveCachedVideos(final, String(folderToScan));
+          // 儲存本次掃到的群組詳情（下次 Mode A 用）
+          if (folderToScan !== null && final.length > 0) {
+            const groupMap = new Map();
+            final.forEach(v => {
+              if (!groupMap.has(v.chatId))
+                groupMap.set(v.chatId, {
+                  chatId: v.chatId, chatTitle: v.chatTitle,
+                  chatType: v.chatType, accessHash: v.accessHash, count: 0,
+                });
+              groupMap.get(v.chatId).count++;
             });
-            saveKnownGroups([...existingMap.values()].sort((a,b) => b.count - a.count));
+            saveFolderGroups(folderToScan, [...groupMap.values()]);
           }
         }
         if (msg.type === 'error') {
@@ -550,14 +548,14 @@ export default function Home() {
       } catch {}
     };
     es.onerror = () => { setScanning(false); setScanStatus('連線中斷'); es.close(); setScanDone(true); };
-  }, [activeId, selectedGroupIds]);
+  }, [activeId, selectedFolderId]);
 
-  // ── 掛載：載入帳號 + 群組設定 ──────────────────────────────────────────────
+  // ── 掛載：載入帳號 + 文件夾設定 ─────────────────────────────────────────────
   useEffect(() => {
-    const ids   = getSelectedGroupIds();
-    const known = getKnownGroups();
-    setSelectedGroupIds(ids);
-    prevSelectedRef.current = ids;
+    const folderId = getSelectedFolderId();
+    const known    = getKnownFolders();
+    setSelectedFolderId(folderId);
+    prevFolderRef.current = folderId;
 
     (async () => {
       try {
@@ -566,15 +564,15 @@ export default function Home() {
         setAccounts(data.accounts);
         setActiveId(data.activeAccountId);
 
-        // 尚未設定群組（第一次進入，或選了空清單）→ 顯示引導
-        const hasGroups = known.length > 0 && (ids === null || ids.length > 0);
-        if (!hasGroups) {
+        // 尚未設定文件夾（第一次進入）→ 顯示引導
+        const hasFolder = known.length > 0 && folderId !== null;
+        if (!hasFolder) {
           setView('main'); // 主畫面會顯示「前往設定」引導
           return;
         }
 
         // 嘗試讀取快取（從影片頁返回時）
-        const cached = getCachedVideos(JSON.stringify(ids));
+        const cached = getCachedVideos(String(folderId));
         if (cached && cached.length > 0) {
           setAllVideos(cached);
           setScanDone(true);
@@ -591,34 +589,34 @@ export default function Home() {
   // ── 掃描觸發：view='main_scan' 且帳號就緒時才掃 ─────────────────────────
   useEffect(() => {
     if (view === 'main_scan' && activeId) {
-      const known = getKnownGroups();
-      const ids   = selectedGroupIds;
-      if (known.length > 0 && (ids === null || ids.length > 0)) {
-        doScan(activeId, ids);
+      const known    = getKnownFolders();
+      const folderId = getSelectedFolderId();
+      if (known.length > 0 && folderId !== null) {
+        doScan(activeId, folderId);
         setView('main');
       }
     }
   }, [view, activeId]); // eslint-disable-line
 
-  // ── 回到首頁時（focus）偵測群組是否改變 → 若改變則重掃 ──────────────────
+  // ── 回到首頁時（focus）偵測文件夾是否改變 → 若改變則重掃 ────────────────
   useEffect(() => {
     const onFocus = () => {
-      const newIds = getSelectedGroupIds();
-      const prev   = prevSelectedRef.current;
-      if (JSON.stringify(prev) !== JSON.stringify(newIds)) {
+      const newFolderId = getSelectedFolderId();
+      const prev        = prevFolderRef.current;
+      if (prev !== newFolderId) {
         clearCachedVideos();
-        setSelectedGroupIds(newIds);
-        prevSelectedRef.current = newIds;
+        setSelectedFolderId(newFolderId);
+        prevFolderRef.current = newFolderId;
 
-        const known    = getKnownGroups();
+        const known    = getKnownFolders();
         const isActive = view === 'main' || view === 'main_scan';
         if (isActive && activeId) {
-          const hasGroups = known.length > 0 && (newIds === null || newIds.length > 0);
-          if (hasGroups) {
+          const hasFolder = known.length > 0 && newFolderId !== null;
+          if (hasFolder) {
             setAllVideos([]);
-            doScan(activeId, newIds);
+            doScan(activeId, newFolderId);
           } else {
-            // 群組取消選擇 → 清空但不掃
+            // 文件夾取消選擇 → 清空但不掃
             if (esRef.current) { esRef.current.close(); esRef.current = null; }
             setAllVideos([]);
             setScanning(false);
@@ -663,7 +661,7 @@ export default function Home() {
   // ── 播放影片 ──────────────────────────────────────────────────────────────
   function handlePlay(video) {
     addWatched(video);
-    saveCachedVideos(allVideos, JSON.stringify(selectedGroupIds));
+    saveCachedVideos(allVideos, String(selectedFolderId));
     savePlaylist(displayVideos);
     const p = new URLSearchParams({
       chatId: video.chatId, msgId: video.msgId,
@@ -689,10 +687,10 @@ export default function Home() {
   }, []);
 
   // ── Render ────────────────────────────────────────────────────────────────
-  const known         = getKnownGroups();
-  const hasGroups     = known.length > 0 && (selectedGroupIds === null || (selectedGroupIds && selectedGroupIds.length > 0));
-  const isFirstTime   = known.length === 0;  // 從未蒐集過群組
-  const noSelection   = !isFirstTime && selectedGroupIds !== null && selectedGroupIds.length === 0;
+  const known         = getKnownFolders();
+  const isFirstTime   = known.length === 0;      // 從未取得過文件夾
+  const noSelection   = !isFirstTime && selectedFolderId === null;  // 有文件夾但未選
+  const hasGroups     = !isFirstTime && selectedFolderId !== null;  // 已選文件夾
 
   if (view === 'loading') return (
     <div style={{minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center'}}>
@@ -773,9 +771,9 @@ export default function Home() {
                 ? `共 ${allVideos.length} 支（顯示 ${displayVideos.length} 支）`
                 : '尚無影片'}
           </span>
-          {!scanning && selectedGroupIds !== null && selectedGroupIds.length > 0 && (
+          {!scanning && selectedFolderId !== null && (
             <span style={{fontSize:10,background:'#7c3aed22',color:'#a78bfa',borderRadius:10,padding:'2px 7px',flexShrink:0,whiteSpace:'nowrap'}}>
-              {selectedGroupIds.length} 群組
+              {known.find(f => f.id === selectedFolderId)?.title || (selectedFolderId === 0 ? '全部聊天' : `文件夾 ${selectedFolderId}`)}
             </span>
           )}
         </div>
@@ -804,7 +802,7 @@ export default function Home() {
 
         {/* 重新掃描按鈕 */}
         <button
-          onClick={() => { setAllVideos([]); doScan(activeId, selectedGroupIds); }}
+          onClick={() => { setAllVideos([]); doScan(activeId, selectedFolderId); }}
           disabled={scanning || !hasGroups}
           style={{flexShrink:0,display:'flex',alignItems:'center',gap:5,
             padding:'5px 13px',borderRadius:7,fontSize:12,fontWeight:600,

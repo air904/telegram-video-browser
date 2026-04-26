@@ -32,12 +32,13 @@ export default async function handler(req, res) {
     search = '',
     maxGroups = '30',
     accountId,
-    minDuration = '10',
-    maxDuration = '180',
-    videosPerGroup = '50',  // 每個群組最多回傳幾支（dedup 後）
-    days = '7',             // 只顯示最近 N 天；0 = 不限
+    minDuration = '0',
+    maxDuration = '99999',
+    videosPerGroup = '200', // 每個群組最多回傳幾支（dedup 後）
+    days = '0',             // 只顯示最近 N 天；0 = 不限
     groupsInfo = '',        // 模式 A：chatId:hash:type:encodedTitle,...
     chatIds = '',           // 舊版相容
+    folderId = '',          // 模式 B 文件夾：Telegram folder ID（空字串 = 不限）
   } = req.query;
 
   const minSec = parseInt(minDuration) || 0;
@@ -108,9 +109,16 @@ export default async function handler(req, res) {
       return;
     }
 
-    // 模式 B：掃最近 maxGroups 個群組（全掃模式，速度和以前一樣）
+    // 模式 B：透過 getDialogs 掃群組
+    // 若有 folderId → 只掃該文件夾內的對話；否則掃最近 N 個
     const selectedChatIds = chatIds ? chatIds.split(',').filter(Boolean) : [];
-    const dialogs = await client.getDialogs({ limit: parseInt(maxGroups) + 20 });
+    const folderIdNum = folderId !== '' ? parseInt(folderId) : null;
+
+    const dialogOpts = folderIdNum !== null
+      ? { limit: 500, folder: folderIdNum }          // 依文件夾取得
+      : { limit: parseInt(maxGroups) + 20 };          // 依最近對話數取得
+
+    const dialogs = await client.getDialogs(dialogOpts);
     let groupDialogs = dialogs.filter((d) => d.isGroup || d.isChannel);
 
     if (selectedChatIds.length > 0) {
@@ -118,7 +126,8 @@ export default async function handler(req, res) {
         const id = d.entity?.id?.toString() || d.id?.toString();
         return selectedChatIds.includes(id);
       });
-    } else {
+    } else if (folderIdNum === null) {
+      // 非文件夾模式才限制數量
       groupDialogs = groupDialogs.slice(0, parseInt(maxGroups));
     }
 
