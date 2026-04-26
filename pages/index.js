@@ -7,6 +7,7 @@ import {
   getKnownFolders, saveKnownFolders,
   getSelectedFolderId, saveSelectedFolderId,
   getFolderGroups, saveFolderGroups,
+  getSelectedGroupsInFolder,
   saveCachedVideos, getCachedVideos, clearCachedVideos,
 } from '../lib/storage';
 
@@ -491,23 +492,33 @@ export default function Home() {
       maxDuration: 99999,
     });
 
-    // 模式 A：若有文件夾的群組快取，直接建 InputPeer 跳過 getDialogs
+    // 決定掃描模式
     if (folderToScan !== null && folderToScan !== undefined) {
-      const cachedGroups = getFolderGroups(folderToScan);
-      if (cachedGroups && cachedGroups.length > 0) {
-        const groupsInfo = cachedGroups.map(g => [
-          g.chatId,
-          g.accessHash || '0',
-          g.chatType || 'channel',
-          encodeURIComponent(g.chatTitle || g.chatId),
-        ].join(':')).join(',');
-        params.set('groupsInfo', groupsInfo);
+      const userSelectedGroups = getSelectedGroupsInFolder(folderToScan);
+      // userSelectedGroups: null = 全選文件夾, array = 使用者勾選的特定群組
+
+      const toGroupsInfo = (gs) => gs.map(g => [
+        g.chatId,
+        g.accessHash || '0',
+        g.chatType || 'channel',
+        encodeURIComponent(g.chatTitle || g.chatId),
+      ].join(':')).join(',');
+
+      if (userSelectedGroups !== null && userSelectedGroups.length > 0) {
+        // 使用者明確勾選特定群組 → 模式 A（直接用，不需 getDialogs）
+        params.set('groupsInfo', toGroupsInfo(userSelectedGroups));
       } else {
-        // 模式 B：傳 folderId 給 server，由 server 呼叫 getDialogs(folder=N)
-        params.set('folderId', String(folderToScan));
+        // 全選文件夾 → 嘗試用快取群組做模式 A，否則模式 B
+        const cachedGroups = getFolderGroups(folderToScan);
+        if (cachedGroups && cachedGroups.length > 0) {
+          params.set('groupsInfo', toGroupsInfo(cachedGroups));
+        } else {
+          // 模式 B：server 自己呼叫 getDialogs(folder=N)
+          params.set('folderId', String(folderToScan));
+        }
       }
     }
-    // folderToScan === null → 不掃（不應發生，按鈕已 disabled）
+    // folderToScan === null → 不掃（按鈕已 disabled）
 
     const es = new EventSource(`/api/videos?${params}`);
     esRef.current = es;
