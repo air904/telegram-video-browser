@@ -32,6 +32,10 @@
     "pages/api/folder-groups.js": {
       "maxDuration": 60,
       "memory": 512
+    },
+    "pages/api/folder-debug.js": {
+      "maxDuration": 60,
+      "memory": 512
     }
   }
 }
