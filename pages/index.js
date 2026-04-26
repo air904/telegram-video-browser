@@ -434,6 +434,7 @@ export default function Home() {
   const toastTimer      = useRef(null);
   const prevFolderRef   = useRef(undefined); // 追蹤上次文件夾選擇
   const pendingRef      = useRef([]);         // 掃描期間累積，done 時 atomic replace
+  const scanTimeoutRef  = useRef(null);       // 掃描逾時保護
 
   // ── displayVideos：allVideos 套上所有 client-side filter ──────────────────
   const displayVideos = useMemo(() => {
@@ -475,10 +476,24 @@ export default function Home() {
   const doScan = useCallback((accountId, folderId) => {
     clearCachedVideos();
     if (esRef.current) { esRef.current.close(); esRef.current = null; }
+    if (scanTimeoutRef.current) { clearTimeout(scanTimeoutRef.current); scanTimeoutRef.current = null; }
     pendingRef.current = [];
     setScanning(true);
     setScanDone(false);
     setScanStatus('連線中…');
+
+    // ── 3 分鐘逾時保護：防止 Vercel function 靜默超時後 spinner 永遠轉 ──────
+    scanTimeoutRef.current = setTimeout(() => {
+      if (esRef.current) { esRef.current.close(); esRef.current = null; }
+      const partial = pendingRef.current;
+      if (partial.length > 0) {
+        setAllVideos(partial);
+        saveCachedVideos(partial, String(folderId !== undefined ? folderId : null));
+      }
+      setScanning(false);
+      setScanDone(true);
+      setScanStatus(partial.length > 0 ? `掃描逾時，已取得 ${partial.length} 支` : '掃描逾時，請稍後重試');
+    }, 3 * 60 * 1000);
 
     const accId    = accountId || activeId;
     const folderToScan = folderId !== undefined ? folderId : selectedFolderId;
@@ -533,6 +548,7 @@ export default function Home() {
           pendingRef.current = [...pendingRef.current, msg.video].sort((a, b) => b.date - a.date);
         }
         if (msg.type === 'done') {
+          if (scanTimeoutRef.current) { clearTimeout(scanTimeoutRef.current); scanTimeoutRef.current = null; }
           const final = pendingRef.current;
           setAllVideos(final);
           setScanning(false); setScanStatus(''); es.close();
@@ -554,11 +570,17 @@ export default function Home() {
           }
         }
         if (msg.type === 'error') {
+          if (scanTimeoutRef.current) { clearTimeout(scanTimeoutRef.current); scanTimeoutRef.current = null; }
           setScanning(false); setScanStatus(`錯誤：${msg.message}`); es.close(); setScanDone(true);
         }
       } catch {}
     };
-    es.onerror = () => { setScanning(false); setScanStatus('連線中斷'); es.close(); setScanDone(true); };
+    es.onerror = () => {
+      if (scanTimeoutRef.current) { clearTimeout(scanTimeoutRef.current); scanTimeoutRef.current = null; }
+      const partial = pendingRef.current;
+      if (partial.length > 0) setAllVideos(partial);
+      setScanning(false); setScanStatus(partial.length > 0 ? `已取得 ${partial.length} 支（連線中斷）` : '連線中斷'); es.close(); setScanDone(true);
+    };
   }, [activeId, selectedFolderId]);
 
   // ── 掛載：載入帳號 + 文件夾設定 ─────────────────────────────────────────────

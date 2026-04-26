@@ -1,11 +1,10 @@
 /**
- * /settings — 設定頁 v2.0（簡潔版）
+ * /settings — 設定頁 v2.1
  * ・取得所有群組與頻道
- * ・關鍵字搜尋
- * ・全選 / 全不選 / 個別勾選
- * ・儲存後返回首頁自動重掃
+ * ・關鍵字搜尋即時過濾
+ * ・全選 / 個別勾選，點選後自動儲存（不需手動按儲存）
  */
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import Head from 'next/head';
 import Link from 'next/link';
 import {
@@ -53,36 +52,57 @@ function CheckBox({ checked, indeterminate }) {
   return (
     <div style={{ width: 20, height: 20, borderRadius: 6, flexShrink: 0,
       border: `2px solid ${checked || indeterminate ? '#7c3aed' : '#3f3f46'}`,
-      background: checked ? '#7c3aed' : indeterminate ? '#7c3aed55' : 'transparent',
+      background: checked ? '#7c3aed' : indeterminate ? '#7c3aed44' : 'transparent',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       transition: 'all 0.15s' }}>
-      {checked      && <span style={{ color: '#fff', fontSize: 11, fontWeight: 700, lineHeight: 1 }}>✓</span>}
-      {indeterminate && !checked && <span style={{ color: '#fff', fontSize: 11, fontWeight: 700, lineHeight: 1 }}>—</span>}
+      {checked && <span style={{ color: '#fff', fontSize: 11, fontWeight: 700, lineHeight: 1 }}>✓</span>}
+      {indeterminate && !checked && <span style={{ color: '#a78bfa', fontSize: 12, fontWeight: 700, lineHeight: 1 }}>—</span>}
     </div>
   );
 }
 
 export default function SettingsPage() {
-  const [allGroups,  setAllGroups]  = useState([]);   // 從 API 取回的完整清單
-  const [selected,   setSelected]   = useState(null); // null=全選, Set=指定 chatId
-  const [search,     setSearch]     = useState('');
-  const [loading,    setLoading]    = useState(false);
-  const [error,      setError]      = useState('');
-  const [saved,      setSaved]      = useState(false);
+  const [allGroups, setAllGroups] = useState([]);
+  const [selected,  setSelected]  = useState(null); // null=全選, Set=指定 chatId
+  const [search,    setSearch]    = useState('');
+  const [loading,   setLoading]   = useState(false);
+  const [error,     setError]     = useState('');
+  const [savedMsg,  setSavedMsg]  = useState('');
+  const savedTimer = useRef(null);
 
   // ── Mount：讀快取 ─────────────────────────────────────────────────────────
   useEffect(() => {
-    const cached = getFolderGroups(0);           // 上次儲存的群組清單
+    const cached = getFolderGroups(0);
     if (cached?.length) {
       setAllGroups(cached);
-      const sel = getSelectedGroupsInFolder(0);  // null=全選, []=全不選, array=部分
-      if (sel === null) {
-        setSelected(null);
-      } else {
-        setSelected(new Set(sel.map(g => g.chatId)));
-      }
+      const sel = getSelectedGroupsInFolder(0);
+      setSelected(sel === null ? null : new Set((sel || []).map(g => g.chatId)));
     }
   }, []);
+
+  // ── 自動儲存（每次 toggle 後呼叫）────────────────────────────────────────
+  function persistSelection(newSelected, groups) {
+    const gs = groups || allGroups;
+
+    // 確保 folderId=0 和 known folders 都已設定
+    saveSelectedFolderId(0);
+    const known = getKnownFolders();
+    if (!known.find(f => f.id === 0)) {
+      saveKnownFolders([{ id: 0, title: '所有聊天' }, ...known]);
+    }
+
+    if (newSelected === null) {
+      saveSelectedGroupsInFolder(0, null);
+    } else {
+      const arr = gs.filter(g => newSelected.has(g.chatId));
+      saveSelectedGroupsInFolder(0, arr);
+    }
+
+    // 短暫顯示「已儲存」提示
+    clearTimeout(savedTimer.current);
+    setSavedMsg('✓ 已儲存');
+    savedTimer.current = setTimeout(() => setSavedMsg(''), 1200);
+  }
 
   // ── 取得群組清單 ──────────────────────────────────────────────────────────
   async function fetchGroups() {
@@ -93,54 +113,54 @@ export default function SettingsPage() {
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       const gs = data.groups || [];
       setAllGroups(gs);
-      saveFolderGroups(0, gs);   // 快取
-      // 若原本全選 null 或未曾設定，維持全選
+      saveFolderGroups(0, gs);
+
+      // 清理已不存在的 chatId
+      const ids = new Set(gs.map(g => g.chatId));
       const prevSel = getSelectedGroupsInFolder(0);
+      let newSel = null;
       if (prevSel !== null) {
-        // 過濾掉已不存在的 chatId
-        const ids = new Set(gs.map(g => g.chatId));
         const cleaned = (prevSel || []).filter(g => ids.has(g.chatId));
-        setSelected(cleaned.length === gs.length ? null : new Set(cleaned.map(g => g.chatId)));
+        newSel = cleaned.length === gs.length ? null : new Set(cleaned.map(g => g.chatId));
       }
+      setSelected(newSel);
+      persistSelection(newSel, gs);
     } catch (e) {
       setError(e.message || '取得失敗，請稍後再試');
     }
     setLoading(false);
   }
 
-  // ── 儲存 ──────────────────────────────────────────────────────────────────
-  function save() {
-    // 永遠把 folderId 設為 0（所有聊天）
-    saveSelectedFolderId(0);
-
-    // 更新 known folders（確保 folderId=0 存在）
-    const known = getKnownFolders();
-    if (!known.find(f => f.id === 0)) {
-      saveKnownFolders([{ id: 0, title: '所有聊天' }, ...known]);
-    }
-
-    if (selected === null) {
-      // 全選
-      saveSelectedGroupsInFolder(0, null);
-    } else {
-      const gs = allGroups.filter(g => selected.has(g.chatId));
-      saveSelectedGroupsInFolder(0, gs);
-    }
-
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
+  // ── 全選切換 ──────────────────────────────────────────────────────────────
+  function toggleAll() {
+    const newSel = isAllSelected ? new Set() : null;
+    setSelected(newSel);
+    persistSelection(newSel);
   }
 
-  // ── Search filter ─────────────────────────────────────────────────────────
-  const filtered = useMemo(() => {
-    if (!search.trim()) return allGroups;
-    const q = search.toLowerCase();
-    return allGroups.filter(g => g.chatTitle.toLowerCase().includes(q));
-  }, [allGroups, search]);
+  // ── 個別群組切換 ──────────────────────────────────────────────────────────
+  function toggleGroup(chatId) {
+    let newSel;
+    if (selected === null) {
+      // 全選 → 取消此一
+      newSel = new Set(allGroups.map(g => g.chatId));
+      newSel.delete(chatId);
+    } else {
+      newSel = new Set(selected);
+      if (newSel.has(chatId)) {
+        newSel.delete(chatId);
+      } else {
+        newSel.add(chatId);
+        if (newSel.size >= allGroups.length) newSel = null; // 全部選了 → null
+      }
+    }
+    setSelected(newSel);
+    persistSelection(newSel);
+  }
 
-  // ── Selection helpers ─────────────────────────────────────────────────────
+  // ── Derived state ─────────────────────────────────────────────────────────
   const isAllSelected = selected === null ||
-    (selected instanceof Set && selected.size >= allGroups.length);
+    (selected instanceof Set && allGroups.length > 0 && selected.size >= allGroups.length);
 
   const selectedCount = selected === null
     ? allGroups.length
@@ -148,36 +168,15 @@ export default function SettingsPage() {
 
   const isIndeterminate = !isAllSelected && selectedCount > 0;
 
-  function toggleAll() {
-    if (isAllSelected) {
-      setSelected(new Set()); // 全不選
-    } else {
-      setSelected(null);      // 全選
-    }
-  }
-
-  function toggleGroup(chatId) {
-    if (selected === null) {
-      // 全選 → 取消此一，其他全部明確列出
-      const next = new Set(allGroups.map(g => g.chatId));
-      next.delete(chatId);
-      setSelected(next);
-    } else {
-      const next = new Set(selected);
-      if (next.has(chatId)) {
-        next.delete(chatId);
-      } else {
-        next.add(chatId);
-        if (next.size >= allGroups.length) { setSelected(null); return; }
-      }
-      setSelected(next);
-    }
-  }
-
   function isChecked(chatId) {
-    if (selected === null) return true;
-    return selected instanceof Set && selected.has(chatId);
+    return selected === null || (selected instanceof Set && selected.has(chatId));
   }
+
+  const filtered = useMemo(() => {
+    if (!search.trim()) return allGroups;
+    const q = search.toLowerCase();
+    return allGroups.filter(g => g.chatTitle.toLowerCase().includes(q));
+  }, [allGroups, search]);
 
   return (
     <>
@@ -194,8 +193,8 @@ export default function SettingsPage() {
         ::-webkit-scrollbar-thumb { background: #2e2e35; border-radius: 3px; }
         @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes fadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
-        .group-row { animation: fadeIn 0.12s ease both; }
-        .group-row:active { background: #27272b !important; }
+        .group-row { animation: fadeIn 0.12s ease both; transition: background 0.1s; }
+        .group-row:active { background: #1e1a2e !important; }
       `}</style>
 
       {/* Header */}
@@ -205,25 +204,21 @@ export default function SettingsPage() {
         padding: '0 16px', height: 56, gap: 12 }}>
         <Link href="/" style={{ color: '#a1a1aa', fontSize: 22, textDecoration: 'none', lineHeight: 1 }}>←</Link>
         <h1 style={{ fontSize: 17, fontWeight: 700, flex: 1 }}>設定</h1>
-        {saved && <span style={{ fontSize: 12, color: '#4ade80', flexShrink: 0 }}>✓ 已儲存</span>}
-        {allGroups.length > 0 && (
-          <button onClick={save}
-            style={{ background: '#7c3aed', color: '#fff', borderRadius: 8,
-              padding: '6px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer',
-              flexShrink: 0, border: 'none', fontFamily: 'inherit' }}>
-            儲存
-          </button>
+        {savedMsg && (
+          <span style={{ fontSize: 12, color: '#4ade80', flexShrink: 0, transition: 'opacity 0.3s' }}>
+            {savedMsg}
+          </span>
         )}
       </header>
 
       <main style={{ padding: '16px', paddingBottom: 80 }}>
 
-        {/* ── 取得群組 ── */}
+        {/* ── 取得群組按鈕 ── */}
         <div style={{ marginBottom: 20 }}>
           <div style={{ marginBottom: 12 }}>
             <h2 style={{ fontSize: 15, fontWeight: 700 }}>👥 選擇群組與頻道</h2>
             <p style={{ fontSize: 12, color: '#71717a', marginTop: 4, lineHeight: 1.6 }}>
-              取得帳號中的所有群組，勾選要顯示影片的來源。
+              取得帳號中的所有群組，勾選後自動儲存為影片來源。
             </p>
           </div>
 
@@ -264,12 +259,11 @@ export default function SettingsPage() {
           </div>
         )}
 
-        {/* ── 有群組時 ── */}
+        {/* ── 群組清單 ── */}
         {allGroups.length > 0 && (
           <>
-            {/* 搜尋 + 全選列 */}
+            {/* 搜尋 + 全選 */}
             <div style={{ display: 'flex', gap: 8, marginBottom: 10, alignItems: 'center' }}>
-              {/* 搜尋框 */}
               <div style={{ flex: 1, position: 'relative' }}>
                 <input
                   type="search"
@@ -286,13 +280,9 @@ export default function SettingsPage() {
                   <button onClick={() => setSearch('')}
                     style={{ position: 'absolute', right: 8, top: '50%',
                       transform: 'translateY(-50%)', background: 'none',
-                      color: '#52525b', fontSize: 16, cursor: 'pointer', border: 'none' }}>
-                    ×
-                  </button>
+                      color: '#52525b', fontSize: 16, cursor: 'pointer', border: 'none' }}>×</button>
                 )}
               </div>
-
-              {/* 全選按鈕 */}
               <button
                 onClick={toggleAll}
                 style={{ flexShrink: 0, padding: '8px 14px', borderRadius: 8, fontSize: 12,
@@ -306,15 +296,15 @@ export default function SettingsPage() {
               </button>
             </div>
 
-            {/* 已選 / 總數 顯示 */}
+            {/* 已選統計 */}
             <div style={{ marginBottom: 10, fontSize: 12, color: '#52525b', textAlign: 'right' }}>
               已選{' '}
               <span style={{ color: '#a78bfa', fontWeight: 600 }}>{selectedCount}</span>
               {' '}/ {allGroups.length} 個
-              {search && <span style={{ marginLeft: 6 }}>（顯示 {filtered.length} 個符合）</span>}
+              {search && <span style={{ marginLeft: 6 }}>（顯示 {filtered.length} 筆）</span>}
             </div>
 
-            {/* 群組清單 */}
+            {/* 清單 */}
             <div style={{ borderRadius: 12, overflow: 'hidden', border: '1px solid #1f1f23' }}>
               {filtered.length === 0 ? (
                 <div style={{ padding: '24px', textAlign: 'center', color: '#52525b', fontSize: 13 }}>
@@ -323,7 +313,6 @@ export default function SettingsPage() {
               ) : (
                 filtered.map((g, i) => {
                   const checked = isChecked(g.chatId);
-                  const isLast  = i === filtered.length - 1;
                   return (
                     <div key={g.chatId}
                       className="group-row"
@@ -332,17 +321,16 @@ export default function SettingsPage() {
                         display: 'flex', alignItems: 'center', gap: 12,
                         padding: '12px 16px',
                         background: checked ? '#100d18' : '#111113',
-                        borderBottom: !isLast ? '1px solid #1a1a1e' : 'none',
-                        cursor: 'pointer', transition: 'background 0.1s',
-                        borderLeft: checked ? '3px solid #7c3aed' : '3px solid transparent' }}>
+                        borderBottom: i < filtered.length - 1 ? '1px solid #1a1a1e' : 'none',
+                        cursor: 'pointer',
+                        borderLeft: `3px solid ${checked ? '#7c3aed' : 'transparent'}` }}>
                       <CheckBox checked={checked} />
                       <span style={{ fontSize: 18, flexShrink: 0 }}>
                         {g.chatType === 'channel' ? '📢' : '👥'}
                       </span>
                       <span style={{ flex: 1, fontSize: 14, fontWeight: checked ? 500 : 400,
                         color: checked ? '#d4d4d8' : '#71717a',
-                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                        transition: 'color 0.1s' }}>
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {g.chatTitle}
                       </span>
                     </div>
@@ -350,16 +338,6 @@ export default function SettingsPage() {
                 })
               )}
             </div>
-
-            {/* 底部儲存按鈕 */}
-            <button
-              onClick={save}
-              style={{ width: '100%', marginTop: 16, padding: '13px',
-                borderRadius: 12, fontSize: 15, fontWeight: 700, cursor: 'pointer',
-                background: '#7c3aed', color: '#fff', border: 'none',
-                fontFamily: 'inherit', transition: 'opacity 0.15s' }}>
-              ✓ 儲存選擇（{selectedCount} 個群組）
-            </button>
           </>
         )}
 
