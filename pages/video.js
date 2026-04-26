@@ -86,6 +86,16 @@ export default function VideoPage() {
 
   const videoId = chatId && msgId ? `${chatId}_${msgId}` : null;
 
+  // ── 串流 URL（必須在所有 useEffect 之前定義，避免 TDZ ReferenceError）──────
+  const streamUrl = chatId
+    ? `/api/stream?chatId=${chatId}&msgId=${msgId}&accessHash=${encodeURIComponent(accessHash||'')}` +
+      `&chatType=${chatType}&mimeType=${encodeURIComponent(mimeType||'video/mp4')}&accountId=${accountId}` +
+      `&fileSize=${fileSize||0}` +
+      `&docId=${encodeURIComponent(docId||'')}` +
+      `&docAccessHash=${encodeURIComponent(docAccessHash||'')}` +
+      `&docFileRef=${encodeURIComponent(docFileRef||'')}`
+    : '';
+
   // Load playlist on mount
   useEffect(() => {
     const list = getPlaylist();
@@ -288,15 +298,6 @@ export default function VideoPage() {
     setFav(added);
     showToast(added ? '❤️ 已加入最愛' : '🤍 已從最愛移除');
   };
-
-  const streamUrl = chatId
-    ? `/api/stream?chatId=${chatId}&msgId=${msgId}&accessHash=${encodeURIComponent(accessHash||'')}` +
-      `&chatType=${chatType}&mimeType=${encodeURIComponent(mimeType||'video/mp4')}&accountId=${accountId}` +
-      `&fileSize=${fileSize||0}` +
-      `&docId=${encodeURIComponent(docId||'')}` +
-      `&docAccessHash=${encodeURIComponent(docAccessHash||'')}` +
-      `&docFileRef=${encodeURIComponent(docFileRef||'')}`
-    : '';
 
   const isReady = !!chatId;
   const hasPrev = currentIndex > 0;
