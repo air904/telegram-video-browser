@@ -1,21 +1,20 @@
 /**
- * /settings — 設定頁 v1.2
- * 兩層選擇：Telegram 文件夾 → 文件夾內群組
- * - 選擇文件夾（Radio）→ 自動展開群組列表
- * - 可選「全選此文件夾所有群組」或個別勾選群組
- * - 選擇結果透過 cookie（文件夾）+ localStorage（群組）儲存
+ * /settings — 設定頁 v2.0（簡潔版）
+ * ・取得所有群組與頻道
+ * ・關鍵字搜尋
+ * ・全選 / 全不選 / 個別勾選
+ * ・儲存後返回首頁自動重掃
  */
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import Head from 'next/head';
 import Link from 'next/link';
 import {
   getKnownFolders, saveKnownFolders,
-  getSelectedFolderId, saveSelectedFolderId,
+  saveSelectedFolderId,
   getFolderGroups, saveFolderGroups,
   getSelectedGroupsInFolder, saveSelectedGroupsInFolder,
 } from '../lib/storage';
 
-// ─── Nav ───────────────────────────────────────────────────────────────────────
 function NavBar({ active }) {
   const items = [
     { href: '/', icon: '🏠', label: '首頁', key: 'home' },
@@ -31,7 +30,7 @@ function NavBar({ active }) {
           style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
             justifyContent: 'center', gap: 2,
             color: active === item.key ? '#a78bfa' : '#52525b',
-            textDecoration: 'none', fontSize: 11, fontWeight: 600, transition: 'color 0.15s' }}>
+            textDecoration: 'none', fontSize: 11, fontWeight: 600 }}>
           <span style={{ fontSize: 22 }}>{item.icon}</span>
           {item.label}
         </Link>
@@ -50,206 +49,136 @@ function Spinner({ size = 16 }) {
   );
 }
 
-// 將可能是物件的 title 安全轉為字串（防止舊快取中殘留 TextWithEntities 物件）
-function safeStr(v) {
-  if (typeof v === 'string') return v;
-  if (v && typeof v === 'object' && typeof v.text === 'string') return v.text;
-  return '';
-}
-
-function FolderIcon({ title }) {
-  const t = safeStr(title).toLowerCase();
-  if (!t) return <>📁</>;
-  if (t === '所有聊天' || t === 'all chats') return <>💬</>;
-  if (t.includes('personal') || t.includes('個人'))  return <>👤</>;
-  if (t.includes('unread')   || t.includes('未讀'))  return <>🔔</>;
-  if (t.includes('work')     || t.includes('工作'))  return <>💼</>;
-  if (t.includes('sport')    || t.includes('運動'))  return <>🏃</>;
-  if (t.includes('news')     || t.includes('新聞'))  return <>📰</>;
-  if (t.includes('music')    || t.includes('音樂'))  return <>🎵</>;
-  if (t.includes('video')    || t.includes('影片'))  return <>🎬</>;
-  if (t.includes('fam')      || t.includes('家人'))  return <>👨‍👩‍👧</>;
-  return <>📁</>;
-}
-
-function CheckBox({ checked }) {
+function CheckBox({ checked, indeterminate }) {
   return (
-    <div style={{ width: 18, height: 18, borderRadius: 5, flexShrink: 0,
-      border: `2px solid ${checked ? '#7c3aed' : '#3f3f46'}`,
-      background: checked ? '#7c3aed' : 'transparent',
+    <div style={{ width: 20, height: 20, borderRadius: 6, flexShrink: 0,
+      border: `2px solid ${checked || indeterminate ? '#7c3aed' : '#3f3f46'}`,
+      background: checked ? '#7c3aed' : indeterminate ? '#7c3aed55' : 'transparent',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       transition: 'all 0.15s' }}>
-      {checked && <span style={{ color: '#fff', fontSize: 10, fontWeight: 700, lineHeight: 1 }}>✓</span>}
+      {checked      && <span style={{ color: '#fff', fontSize: 11, fontWeight: 700, lineHeight: 1 }}>✓</span>}
+      {indeterminate && !checked && <span style={{ color: '#fff', fontSize: 11, fontWeight: 700, lineHeight: 1 }}>—</span>}
     </div>
   );
 }
 
-// ─── Main ──────────────────────────────────────────────────────────────────────
 export default function SettingsPage() {
-  const [folders, setFolders]         = useState([]);
-  const [selFolderId, setSelFolderId] = useState(null);
-  const [expandedId, setExpandedId]   = useState(null);
-  const [groups, setGroups]           = useState({});     // { folderId: group[] }
-  const [loadingId, setLoadingId]     = useState(null);   // folderId 群組載入中
-  const [selGroups, setSelGroups]     = useState({});     // { folderId: null | group[] }
-  const [fetching, setFetching]       = useState(false);
-  const [fetchError, setFetchError]   = useState('');
-  const [saved, setSaved]             = useState(false);
+  const [allGroups,  setAllGroups]  = useState([]);   // 從 API 取回的完整清單
+  const [selected,   setSelected]   = useState(null); // null=全選, Set=指定 chatId
+  const [search,     setSearch]     = useState('');
+  const [loading,    setLoading]    = useState(false);
+  const [error,      setError]      = useState('');
+  const [saved,      setSaved]      = useState(false);
 
-  // ── Mount：讀快取 ─────────────────────────────────────────────────────────────
+  // ── Mount：讀快取 ─────────────────────────────────────────────────────────
   useEffect(() => {
-    const known = getKnownFolders();
-    const fId   = getSelectedFolderId();
-    setFolders(known);
-    setSelFolderId(fId);
-
-    const grpMap = {}, selMap = {};
-    known.forEach(f => {
-      const cached = getFolderGroups(f.id);
-      if (cached?.length) grpMap[f.id] = cached;
-      selMap[f.id] = getSelectedGroupsInFolder(f.id);
-    });
-    setGroups(grpMap);
-    setSelGroups(selMap);
-
-    if (known.length === 0) fetchFolders();
-  }, []); // eslint-disable-line
-
-  // ── 取得文件夾列表 ────────────────────────────────────────────────────────────
-  async function fetchFolders() {
-    setFetching(true); setFetchError('');
-    try {
-      const res  = await fetch('/api/folders', { credentials: 'same-origin' });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-      const fs = data.folders || [];
-      saveKnownFolders(fs);
-      setFolders(fs);
-      setSelGroups(prev => {
-        const updated = { ...prev };
-        fs.forEach(f => { if (!(f.id in updated)) updated[f.id] = getSelectedGroupsInFolder(f.id); });
-        return updated;
-      });
-    } catch (e) {
-      setFetchError(e.message || '取得失敗，請稍後再試');
-    }
-    setFetching(false);
-  }
-
-  // ── 取得文件夾內群組（懶載入）────────────────────────────────────────────────
-  async function fetchGroupsForFolder(folderId) {
-    if (groups[folderId]?.length || loadingId === folderId) return;
-    setLoadingId(folderId);
-    try {
-      const res  = await fetch(`/api/folder-groups?folderId=${folderId}`, { credentials: 'same-origin' });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
-      const gs = data.groups || [];
-      setGroups(prev => ({ ...prev, [folderId]: gs }));
-      saveFolderGroups(folderId, gs); // 快取供首頁 Mode A 用
-    } catch {
-      setGroups(prev => ({ ...prev, [folderId]: [] }));
-    }
-    setLoadingId(null);
-  }
-
-  function flash() { setSaved(true); setTimeout(() => setSaved(false), 1500); }
-
-  // ── 選擇文件夾 ────────────────────────────────────────────────────────────────
-  function selectFolder(folderId) {
-    setSelFolderId(folderId);
-    saveSelectedFolderId(folderId);
-    setExpandedId(folderId);
-    fetchGroupsForFolder(folderId);
-    setSelGroups(prev => {
-      if (prev[folderId] === undefined) return { ...prev, [folderId]: null };
-      return prev;
-    });
-    flash();
-  }
-
-  // ── 展開 / 收合群組列表 ───────────────────────────────────────────────────────
-  function toggleExpand(folderId, e) {
-    e.stopPropagation();
-    if (expandedId === folderId) {
-      setExpandedId(null);
-    } else {
-      setExpandedId(folderId);
-      fetchGroupsForFolder(folderId);
-    }
-  }
-
-  // ── helpers ───────────────────────────────────────────────────────────────────
-  function isAllSelected(folderId) {
-    const sel = selGroups[folderId];
-    // null 或 undefined = 全選；空陣列 [] = 未選任何
-    return sel === null || sel === undefined;
-  }
-
-  function isGroupSelected(folderId, chatId) {
-    const sel = selGroups[folderId];
-    if (sel === null || sel === undefined) return true;
-    return sel.some(g => g.chatId === chatId);
-  }
-
-  function getSelectionSummary(folderId) {
-    const sel = selGroups[folderId];
-    if (sel === null || sel === undefined) return '全部群組';
-    if (sel.length === 0) return '未選擇群組';
-    const gs = groups[folderId];
-    if (gs && sel.length >= gs.length) return '全部群組';
-    return `${sel.length} 個群組`;
-  }
-
-  // ── 全選切換 ──────────────────────────────────────────────────────────────────
-  // ✅ 全選（null） → 點擊 → ☐ 取消全部（空陣列，所有群組取消勾選）
-  // ☐ 未全選/空 → 點擊 → ✅ 全選（null）
-  function toggleSelectAll(folderId) {
-    if (isAllSelected(folderId)) {
-      // 全選 → 取消全部選擇
-      setSelGroups(prev => ({ ...prev, [folderId]: [] }));
-      saveSelectedGroupsInFolder(folderId, []);
-    } else {
-      // 非全選（部分或空）→ 回到全選
-      setSelGroups(prev => ({ ...prev, [folderId]: null }));
-      saveSelectedGroupsInFolder(folderId, null);
-    }
-    flash();
-  }
-
-  // ── 個別群組切換 ──────────────────────────────────────────────────────────────
-  function toggleGroup(folderId, group) {
-    if (selFolderId !== folderId) {
-      setSelFolderId(folderId);
-      saveSelectedFolderId(folderId);
-    }
-    const current = selGroups[folderId];
-    const gs = groups[folderId] || [];
-    let newSel;
-
-    if (current === null || current === undefined) {
-      // 全選（null）→ 取消此一群組 → 明確列出其他所有群組
-      newSel = gs.filter(g => g.chatId !== group.chatId);
-      // newSel 可能是空陣列（只有一個群組時），保留空陣列讓用戶看到全部取消
-    } else {
-      const already = current.some(g => g.chatId === group.chatId);
-      if (already) {
-        // 已選 → 取消
-        newSel = current.filter(g => g.chatId !== group.chatId);
-        // 允許空陣列（讓用戶可以全部取消後再重選）
+    const cached = getFolderGroups(0);           // 上次儲存的群組清單
+    if (cached?.length) {
+      setAllGroups(cached);
+      const sel = getSelectedGroupsInFolder(0);  // null=全選, []=全不選, array=部分
+      if (sel === null) {
+        setSelected(null);
       } else {
-        // 未選 → 加入
-        newSel = [...current, group];
-        if (newSel.length >= gs.length) newSel = null; // 全部選了 → 改為 null（全選）
+        setSelected(new Set(sel.map(g => g.chatId)));
       }
     }
+  }, []);
 
-    setSelGroups(prev => ({ ...prev, [folderId]: newSel }));
-    saveSelectedGroupsInFolder(folderId, newSel);
-    flash();
+  // ── 取得群組清單 ──────────────────────────────────────────────────────────
+  async function fetchGroups() {
+    setLoading(true); setError('');
+    try {
+      const res  = await fetch('/api/groups', { credentials: 'same-origin' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      const gs = data.groups || [];
+      setAllGroups(gs);
+      saveFolderGroups(0, gs);   // 快取
+      // 若原本全選 null 或未曾設定，維持全選
+      const prevSel = getSelectedGroupsInFolder(0);
+      if (prevSel !== null) {
+        // 過濾掉已不存在的 chatId
+        const ids = new Set(gs.map(g => g.chatId));
+        const cleaned = (prevSel || []).filter(g => ids.has(g.chatId));
+        setSelected(cleaned.length === gs.length ? null : new Set(cleaned.map(g => g.chatId)));
+      }
+    } catch (e) {
+      setError(e.message || '取得失敗，請稍後再試');
+    }
+    setLoading(false);
   }
 
-  // ── Render ────────────────────────────────────────────────────────────────────
+  // ── 儲存 ──────────────────────────────────────────────────────────────────
+  function save() {
+    // 永遠把 folderId 設為 0（所有聊天）
+    saveSelectedFolderId(0);
+
+    // 更新 known folders（確保 folderId=0 存在）
+    const known = getKnownFolders();
+    if (!known.find(f => f.id === 0)) {
+      saveKnownFolders([{ id: 0, title: '所有聊天' }, ...known]);
+    }
+
+    if (selected === null) {
+      // 全選
+      saveSelectedGroupsInFolder(0, null);
+    } else {
+      const gs = allGroups.filter(g => selected.has(g.chatId));
+      saveSelectedGroupsInFolder(0, gs);
+    }
+
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  }
+
+  // ── Search filter ─────────────────────────────────────────────────────────
+  const filtered = useMemo(() => {
+    if (!search.trim()) return allGroups;
+    const q = search.toLowerCase();
+    return allGroups.filter(g => g.chatTitle.toLowerCase().includes(q));
+  }, [allGroups, search]);
+
+  // ── Selection helpers ─────────────────────────────────────────────────────
+  const isAllSelected = selected === null ||
+    (selected instanceof Set && selected.size >= allGroups.length);
+
+  const selectedCount = selected === null
+    ? allGroups.length
+    : (selected instanceof Set ? selected.size : 0);
+
+  const isIndeterminate = !isAllSelected && selectedCount > 0;
+
+  function toggleAll() {
+    if (isAllSelected) {
+      setSelected(new Set()); // 全不選
+    } else {
+      setSelected(null);      // 全選
+    }
+  }
+
+  function toggleGroup(chatId) {
+    if (selected === null) {
+      // 全選 → 取消此一，其他全部明確列出
+      const next = new Set(allGroups.map(g => g.chatId));
+      next.delete(chatId);
+      setSelected(next);
+    } else {
+      const next = new Set(selected);
+      if (next.has(chatId)) {
+        next.delete(chatId);
+      } else {
+        next.add(chatId);
+        if (next.size >= allGroups.length) { setSelected(null); return; }
+      }
+      setSelected(next);
+    }
+  }
+
+  function isChecked(chatId) {
+    if (selected === null) return true;
+    return selected instanceof Set && selected.has(chatId);
+  }
+
   return (
     <>
       <Head>
@@ -263,11 +192,10 @@ export default function SettingsPage() {
           -webkit-font-smoothing: antialiased; }
         ::-webkit-scrollbar { width: 5px; }
         ::-webkit-scrollbar-thumb { background: #2e2e35; border-radius: 3px; }
-        @keyframes fadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
-        @keyframes slideDown { from { opacity:0; transform:translateY(-6px); } to { opacity:1; transform:none; } }
         @keyframes spin { to { transform: rotate(360deg); } }
-        .folder-row { animation: fadeIn 0.15s ease both; }
-        .group-row  { animation: slideDown 0.1s ease both; }
+        @keyframes fadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
+        .group-row { animation: fadeIn 0.12s ease both; }
+        .group-row:active { background: #27272b !important; }
       `}</style>
 
       {/* Header */}
@@ -275,223 +203,171 @@ export default function SettingsPage() {
         background: 'rgba(13,13,15,0.9)', backdropFilter: 'blur(14px)',
         borderBottom: '1px solid #1f1f23', display: 'flex', alignItems: 'center',
         padding: '0 16px', height: 56, gap: 12 }}>
-        <Link href="/" style={{ color: '#a1a1aa', fontSize: 22, textDecoration: 'none', lineHeight: 1, flexShrink: 0 }}>←</Link>
+        <Link href="/" style={{ color: '#a1a1aa', fontSize: 22, textDecoration: 'none', lineHeight: 1 }}>←</Link>
         <h1 style={{ fontSize: 17, fontWeight: 700, flex: 1 }}>設定</h1>
-        {saved && <span style={{ fontSize: 12, color: '#a78bfa', flexShrink: 0 }}>✓ 已儲存</span>}
+        {saved && <span style={{ fontSize: 12, color: '#4ade80', flexShrink: 0 }}>✓ 已儲存</span>}
+        {allGroups.length > 0 && (
+          <button onClick={save}
+            style={{ background: '#7c3aed', color: '#fff', borderRadius: 8,
+              padding: '6px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer',
+              flexShrink: 0, border: 'none', fontFamily: 'inherit' }}>
+            儲存
+          </button>
+        )}
       </header>
 
       <main style={{ padding: '16px', paddingBottom: 80 }}>
 
-        {/* ── 文件夾 + 群組選擇 ── */}
-        <div style={{ marginBottom: 24 }}>
-          <div style={{ marginBottom: 14 }}>
-            <h2 style={{ fontSize: 15, fontWeight: 700 }}>📂 選擇文件夾與群組</h2>
+        {/* ── 取得群組 ── */}
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ marginBottom: 12 }}>
+            <h2 style={{ fontSize: 15, fontWeight: 700 }}>👥 選擇群組與頻道</h2>
             <p style={{ fontSize: 12, color: '#71717a', marginTop: 4, lineHeight: 1.6 }}>
-              選取一個 Telegram 文件夾作為影片來源。<br/>
-              可展開文件夾，進一步選擇特定群組或頻道。
+              取得帳號中的所有群組，勾選要顯示影片的來源。
             </p>
           </div>
 
-          {/* 取得文件夾按鈕 */}
           <button
-            onClick={fetchFolders}
-            disabled={fetching}
-            style={{ width: '100%', marginBottom: 14,
-              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+            onClick={fetchGroups}
+            disabled={loading}
+            style={{ width: '100%', display: 'flex', alignItems: 'center',
+              justifyContent: 'center', gap: 8,
               padding: '11px 16px', borderRadius: 10, fontSize: 13, fontWeight: 600,
-              background: fetching ? '#1f1f23' : folders.length === 0 ? '#7c3aed' : '#18181b',
-              color: fetching ? '#71717a' : folders.length === 0 ? '#fff' : '#a78bfa',
-              border: folders.length === 0 ? '1px solid transparent' : '1px solid #3f3f46',
-              cursor: fetching ? 'not-allowed' : 'pointer', transition: 'all 0.15s' }}>
-            {fetching
+              background: loading ? '#1f1f23' : allGroups.length === 0 ? '#7c3aed' : '#18181b',
+              color: loading ? '#71717a' : allGroups.length === 0 ? '#fff' : '#a78bfa',
+              border: allGroups.length === 0 ? '1px solid transparent' : '1px solid #3f3f46',
+              cursor: loading ? 'not-allowed' : 'pointer', transition: 'all 0.15s',
+              fontFamily: 'inherit' }}>
+            {loading
               ? <><Spinner size={14} /> 取得中，請稍候…</>
-              : folders.length === 0
-                ? <>📂 取得帳號文件夾</>
-                : <>🔄 重新取得文件夾（共 {folders.length} 個）</>
+              : allGroups.length === 0
+                ? <>👥 取得所有群組</>
+                : <>🔄 重新取得（共 {allGroups.length} 個）</>
             }
           </button>
 
-          {/* 錯誤提示 */}
-          {fetchError && (
-            <div style={{ background: '#ef444422', border: '1px solid #ef444455',
-              borderRadius: 8, padding: '10px 14px', color: '#fca5a5',
-              fontSize: 12, marginBottom: 14 }}>
-              ⚠️ {fetchError}
+          {error && (
+            <div style={{ marginTop: 10, background: '#ef444422', border: '1px solid #ef444455',
+              borderRadius: 8, padding: '10px 14px', color: '#fca5a5', fontSize: 12 }}>
+              ⚠️ {error}
             </div>
-          )}
-
-          {/* 空狀態 */}
-          {!fetching && folders.length === 0 && !fetchError && (
-            <div style={{ textAlign: 'center', padding: '40px 20px', color: '#52525b',
-              background: '#111113', borderRadius: 12, border: '1px solid #1f1f23' }}>
-              <div style={{ fontSize: 36, marginBottom: 10 }}>📭</div>
-              <p style={{ fontSize: 14, fontWeight: 600, color: '#3f3f46' }}>尚無文件夾資料</p>
-              <p style={{ fontSize: 12, marginTop: 6 }}>點擊上方按鈕取得帳號文件夾</p>
-            </div>
-          )}
-
-          {/* ── 文件夾清單 ── */}
-          {folders.length > 0 && (
-            <div style={{ borderRadius: 12, overflow: 'hidden', border: '1px solid #1f1f23' }}>
-              {folders.map((folder, i) => {
-                const isSelected   = selFolderId === folder.id;
-                const isExpanded   = expandedId  === folder.id;
-                const grpList      = groups[folder.id] || [];
-                const isLoadingGrp = loadingId   === folder.id;
-                const isLast       = i === folders.length - 1;
-                const summary      = isSelected ? getSelectionSummary(folder.id) : null;
-
-                return (
-                  <div key={folder.id}>
-                    {/* 文件夾列 */}
-                    <div className="folder-row"
-                      onClick={() => selectFolder(folder.id)}
-                      style={{ animationDelay: `${Math.min(i * 0.04, 0.4)}s`,
-                        display: 'flex', alignItems: 'center', gap: 12, padding: '14px 16px',
-                        background: isSelected ? '#1c1528' : '#111113',
-                        borderBottom: (!isLast || isExpanded) ? '1px solid #1f1f23' : 'none',
-                        cursor: 'pointer', transition: 'background 0.15s',
-                        borderLeft: isSelected ? '3px solid #7c3aed' : '3px solid transparent' }}>
-
-                      {/* Radio */}
-                      <div style={{ width: 20, height: 20, borderRadius: '50%', flexShrink: 0,
-                        border: `2px solid ${isSelected ? '#7c3aed' : '#3f3f46'}`,
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        transition: 'all 0.15s' }}>
-                        {isSelected && <div style={{ width: 10, height: 10, borderRadius: '50%', background: '#7c3aed' }}/>}
-                      </div>
-
-                      {/* Icon */}
-                      <span style={{ fontSize: 20, flexShrink: 0 }}>
-                        <FolderIcon title={folder.title} />
-                      </span>
-
-                      {/* 名稱 + 已選摘要 */}
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <p style={{ fontWeight: 600, fontSize: 15,
-                          color: isSelected ? '#c4b5fd' : '#d4d4d8',
-                          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {safeStr(folder.title) || `文件夾 ${folder.id}`}
-                        </p>
-                        {isSelected && summary && (
-                          <p style={{ fontSize: 11, color: '#7c3aed', marginTop: 2 }}>
-                            已選：{summary}
-                          </p>
-                        )}
-                      </div>
-
-                      {/* 展開群組按鈕 */}
-                      <button
-                        onClick={e => toggleExpand(folder.id, e)}
-                        style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4,
-                          padding: '4px 10px', borderRadius: 6, cursor: 'pointer',
-                          color: isExpanded ? '#a78bfa' : '#71717a',
-                          background: isExpanded ? '#7c3aed22' : 'transparent',
-                          border: `1px solid ${isExpanded ? '#7c3aed55' : '#2e2e35'}`,
-                          fontSize: 11, fontWeight: 600, transition: 'all 0.15s' }}>
-                        {isLoadingGrp
-                          ? <Spinner size={10}/>
-                          : grpList.length > 0 ? `${grpList.length} 群` : '群組'
-                        }
-                        <span style={{ fontSize: 9, transition: 'transform 0.2s', display: 'inline-block',
-                          transform: isExpanded ? 'rotate(180deg)' : 'none' }}>▼</span>
-                      </button>
-                    </div>
-
-                    {/* 群組面板（展開） */}
-                    {isExpanded && (
-                      <div style={{ background: '#09090b',
-                        borderBottom: !isLast ? '1px solid #1f1f23' : 'none' }}>
-
-                        {/* 載入中 */}
-                        {isLoadingGrp && (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8,
-                            padding: '14px 20px', color: '#52525b', fontSize: 12 }}>
-                            <Spinner size={12}/> 載入群組中…
-                          </div>
-                        )}
-
-                        {/* 沒有群組 */}
-                        {!isLoadingGrp && grpList.length === 0 && (
-                          <div style={{ padding: '14px 20px', color: '#3f3f46', fontSize: 12 }}>
-                            此文件夾內沒有群組或頻道
-                          </div>
-                        )}
-
-                        {/* 群組列表 */}
-                        {!isLoadingGrp && grpList.length > 0 && (
-                          <>
-                            {/* 全選列 */}
-                            <div className="group-row"
-                              onClick={() => toggleSelectAll(folder.id)}
-                              style={{ display: 'flex', alignItems: 'center', gap: 12,
-                                padding: '12px 20px', cursor: 'pointer',
-                                background: isAllSelected(folder.id) ? '#1a1028' : 'transparent',
-                                borderBottom: '1px solid #16161a' }}>
-                              <CheckBox checked={isAllSelected(folder.id)} />
-                              <span style={{ flex: 1, fontSize: 13, fontWeight: 600,
-                                color: isAllSelected(folder.id) ? '#c4b5fd' : '#a1a1aa' }}>
-                                ✨ 全選此文件夾所有群組
-                              </span>
-                              <span style={{ fontSize: 10, color: '#52525b', flexShrink: 0 }}>
-                                共 {grpList.length} 個
-                              </span>
-                            </div>
-
-                            {/* 個別群組 */}
-                            {grpList.map((g, gi) => {
-                              const isSel = isGroupSelected(folder.id, g.chatId);
-                              return (
-                                <div key={g.chatId} className="group-row"
-                                  onClick={() => toggleGroup(folder.id, g)}
-                                  style={{ animationDelay: `${Math.min(gi * 0.018, 0.3)}s`,
-                                    display: 'flex', alignItems: 'center', gap: 12,
-                                    padding: '10px 20px 10px 26px', cursor: 'pointer',
-                                    background: isSel ? '#100d18' : 'transparent',
-                                    borderBottom: gi < grpList.length - 1 ? '1px solid #111115' : 'none',
-                                    transition: 'background 0.1s' }}>
-                                  <CheckBox checked={isSel} />
-                                  <span style={{ fontSize: 14, flexShrink: 0 }}>
-                                    {g.chatType === 'channel' ? '📢' : '👥'}
-                                  </span>
-                                  <span style={{ flex: 1, fontSize: 13,
-                                    color: isSel ? '#d4d4d8' : '#52525b',
-                                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                                    transition: 'color 0.1s' }}>
-                                    {g.chatTitle}
-                                  </span>
-                                </div>
-                              );
-                            })}
-                          </>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
-          {/* 選取說明 */}
-          {selFolderId !== null && folders.length > 0 && (
-            <p style={{ fontSize: 11, color: '#52525b', marginTop: 10, textAlign: 'center' }}>
-              已選：
-              <span style={{ color: '#a78bfa' }}>
-                {safeStr(folders.find(f => f.id === selFolderId)?.title) || `文件夾 ${selFolderId}`}
-              </span>
-              {' → '}
-              <span style={{ color: '#a78bfa' }}>{getSelectionSummary(selFolderId)}</span>
-              　→　返回首頁後將自動重新掃描
-            </p>
           )}
         </div>
 
+        {/* ── 空狀態 ── */}
+        {!loading && allGroups.length === 0 && !error && (
+          <div style={{ textAlign: 'center', padding: '48px 20px', color: '#52525b',
+            background: '#111113', borderRadius: 12, border: '1px solid #1f1f23' }}>
+            <div style={{ fontSize: 40, marginBottom: 10 }}>📭</div>
+            <p style={{ fontSize: 14, fontWeight: 600, color: '#3f3f46' }}>尚無群組資料</p>
+            <p style={{ fontSize: 12, marginTop: 6 }}>點擊上方按鈕取得所有群組</p>
+          </div>
+        )}
+
+        {/* ── 有群組時 ── */}
+        {allGroups.length > 0 && (
+          <>
+            {/* 搜尋 + 全選列 */}
+            <div style={{ display: 'flex', gap: 8, marginBottom: 10, alignItems: 'center' }}>
+              {/* 搜尋框 */}
+              <div style={{ flex: 1, position: 'relative' }}>
+                <input
+                  type="search"
+                  placeholder="搜尋群組名稱…"
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  style={{ width: '100%', background: '#18181b', border: '1px solid #2e2e35',
+                    borderRadius: 8, padding: '8px 12px 8px 34px',
+                    color: '#f4f4f5', fontSize: 13, outline: 'none', fontFamily: 'inherit' }}
+                />
+                <span style={{ position: 'absolute', left: 10, top: '50%',
+                  transform: 'translateY(-50%)', color: '#52525b', fontSize: 14 }}>🔍</span>
+                {search && (
+                  <button onClick={() => setSearch('')}
+                    style={{ position: 'absolute', right: 8, top: '50%',
+                      transform: 'translateY(-50%)', background: 'none',
+                      color: '#52525b', fontSize: 16, cursor: 'pointer', border: 'none' }}>
+                    ×
+                  </button>
+                )}
+              </div>
+
+              {/* 全選按鈕 */}
+              <button
+                onClick={toggleAll}
+                style={{ flexShrink: 0, padding: '8px 14px', borderRadius: 8, fontSize: 12,
+                  fontWeight: 600, cursor: 'pointer', border: '1px solid #3f3f46',
+                  background: isAllSelected ? '#7c3aed22' : 'transparent',
+                  color: isAllSelected ? '#a78bfa' : '#71717a',
+                  transition: 'all 0.15s', fontFamily: 'inherit',
+                  display: 'flex', alignItems: 'center', gap: 6 }}>
+                <CheckBox checked={isAllSelected} indeterminate={isIndeterminate} />
+                全選
+              </button>
+            </div>
+
+            {/* 已選 / 總數 顯示 */}
+            <div style={{ marginBottom: 10, fontSize: 12, color: '#52525b', textAlign: 'right' }}>
+              已選{' '}
+              <span style={{ color: '#a78bfa', fontWeight: 600 }}>{selectedCount}</span>
+              {' '}/ {allGroups.length} 個
+              {search && <span style={{ marginLeft: 6 }}>（顯示 {filtered.length} 個符合）</span>}
+            </div>
+
+            {/* 群組清單 */}
+            <div style={{ borderRadius: 12, overflow: 'hidden', border: '1px solid #1f1f23' }}>
+              {filtered.length === 0 ? (
+                <div style={{ padding: '24px', textAlign: 'center', color: '#52525b', fontSize: 13 }}>
+                  無符合「{search}」的群組
+                </div>
+              ) : (
+                filtered.map((g, i) => {
+                  const checked = isChecked(g.chatId);
+                  const isLast  = i === filtered.length - 1;
+                  return (
+                    <div key={g.chatId}
+                      className="group-row"
+                      onClick={() => toggleGroup(g.chatId)}
+                      style={{ animationDelay: `${Math.min(i * 0.012, 0.3)}s`,
+                        display: 'flex', alignItems: 'center', gap: 12,
+                        padding: '12px 16px',
+                        background: checked ? '#100d18' : '#111113',
+                        borderBottom: !isLast ? '1px solid #1a1a1e' : 'none',
+                        cursor: 'pointer', transition: 'background 0.1s',
+                        borderLeft: checked ? '3px solid #7c3aed' : '3px solid transparent' }}>
+                      <CheckBox checked={checked} />
+                      <span style={{ fontSize: 18, flexShrink: 0 }}>
+                        {g.chatType === 'channel' ? '📢' : '👥'}
+                      </span>
+                      <span style={{ flex: 1, fontSize: 14, fontWeight: checked ? 500 : 400,
+                        color: checked ? '#d4d4d8' : '#71717a',
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                        transition: 'color 0.1s' }}>
+                        {g.chatTitle}
+                      </span>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {/* 底部儲存按鈕 */}
+            <button
+              onClick={save}
+              style={{ width: '100%', marginTop: 16, padding: '13px',
+                borderRadius: 12, fontSize: 15, fontWeight: 700, cursor: 'pointer',
+                background: '#7c3aed', color: '#fff', border: 'none',
+                fontFamily: 'inherit', transition: 'opacity 0.15s' }}>
+              ✓ 儲存選擇（{selectedCount} 個群組）
+            </button>
+          </>
+        )}
+
         {/* ── 關於 ── */}
-        <div style={{ borderRadius: 12, background: '#111113', border: '1px solid #1f1f23',
-          padding: '16px', textAlign: 'center' }}>
+        <div style={{ marginTop: 24, borderRadius: 12, background: '#111113',
+          border: '1px solid #1f1f23', padding: '14px 16px', textAlign: 'center' }}>
           <p style={{ fontSize: 13, color: '#52525b' }}>Telegram 影片瀏覽器</p>
-          <p style={{ fontSize: 20, fontWeight: 700, color: '#3f3f46', marginTop: 4 }}>v1.2</p>
+          <p style={{ fontSize: 18, fontWeight: 700, color: '#3f3f46', marginTop: 4 }}>v1.2</p>
         </div>
       </main>
 
