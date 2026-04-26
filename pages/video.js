@@ -72,8 +72,9 @@ export default function VideoPage() {
   const [toast, setToast]         = useState('');
   const [playlist, setPlaylist]   = useState([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
-  const [swipeHint, setSwipeHint] = useState(''); // 'next'|'prev'
-  const [seekHint,  setSeekHint]  = useState(''); // 'forward'|'back'
+  const [swipeHint, setSwipeHint] = useState('');   // 'next'|'prev'
+  const [seekHint,  setSeekHint]  = useState('');   // 'forward'|'back'
+  const [seekAmount, setSeekAmount] = useState(0);  // 目前預計跳轉秒數（即時顯示）
   const [speedHint, setSpeedHint] = useState(false); // 2x 快速播放 overlay
   // ── 全螢幕 ──────────────────────────────────────────────────────────────────
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -241,24 +242,51 @@ export default function VideoPage() {
   }, [currentIndex, playlist, goNext, showToast]);
 
   // ── 觸控手勢偵測 ─────────────────────────────────────────────────────────────
-  // deltaX > 0 → 手指往左移 → 快退；deltaX < 0 → 手指往右移 → 快轉
-  // deltaY > 0 → 手指往上移 → 下一支；deltaY < 0 → 手指往下移 → 上一支
-  const SEEK_SECS = 10;
+  // 水平滑：≥40px 開始，每多 10px 多跳 10 秒（即時顯示）
+  // 垂直滑：上 → 下一支，下 → 上一支
+  // 長按影片上半部：儲存最愛 / 取消最愛
+  // 長按影片下半部：2x 快速播放（放開恢復）
+
+  /** 根據水平滑動距離計算跳轉秒數 */
+  const calcSeek = (absX) => (Math.floor((absX - 40) / 10) + 1) * 10;
 
   const handleTouchStart = useCallback((e) => {
     touchStartY.current = e.touches[0].clientY;
     touchStartX.current = e.touches[0].clientX;
 
-    // 長按計時（500ms 觸發 2x 快速播放）
+    // 長按計時（500ms）
     clearTimeout(longPressTimer.current);
     longPressTimer.current = setTimeout(() => {
       const vid = videoRef.current;
       if (!vid) return;
-      is2xMode.current = true;
-      vid.playbackRate = 2;
-      setSpeedHint(true);
+
+      // 確認按壓位置在影片元素範圍內
+      const rect = vid.getBoundingClientRect();
+      const ty = touchStartY.current, tx = touchStartX.current;
+      if (tx < rect.left || tx > rect.right || ty < rect.top || ty > rect.bottom) return;
+
+      if (ty < rect.top + rect.height / 2) {
+        // ── 上半部：儲存 / 取消最愛 ──────────────────────────────────────
+        if (!videoId) return;
+        const video = {
+          id: videoId, chatId, msgId, accessHash, chatType,
+          mimeType: mimeType || 'video/mp4', accountId,
+          title: title || '', chatTitle: chatTitle || '',
+          date: parseInt(date) || 0, duration: parseInt(duration) || 0,
+          fileSize: parseInt(fileSize) || 0, hasThumbnail: hasThumbnail === 'true',
+        };
+        const added = toggleFavorite(video);
+        setFav(added);
+        showToast(added ? '❤️ 長按儲存影片' : '🤍 已從最愛移除');
+      } else {
+        // ── 下半部：2x 快速播放 ───────────────────────────────────────────
+        is2xMode.current = true;
+        vid.playbackRate = 2;
+        setSpeedHint(true);
+      }
     }, 500);
-  }, []);
+  }, [videoId, chatId, msgId, accessHash, chatType, mimeType, accountId,   // eslint-disable-line
+      title, chatTitle, date, duration, fileSize, hasThumbnail, showToast]); // eslint-disable-line
 
   const handleTouchMove = useCallback((e) => {
     if (touchStartY.current === null) return;
@@ -269,14 +297,15 @@ export default function VideoPage() {
     if (absY > 10 || absX > 10) clearTimeout(longPressTimer.current);
 
     if (absX > absY) {
-      // 水平滑動 → 快轉 / 快退提示
+      // 水平滑動 → 快轉 / 快退提示（即時顯示秒數）
       setSwipeHint('');
-      if (absX < 30) { setSeekHint(''); return; }
+      if (absX < 40) { setSeekHint(''); setSeekAmount(0); return; }
       const deltaX = touchStartX.current - e.touches[0].clientX;
       setSeekHint(deltaX > 0 ? 'back' : 'forward');
+      setSeekAmount(calcSeek(absX));
     } else {
       // 垂直滑動 → 切換影片提示
-      setSeekHint('');
+      setSeekHint(''); setSeekAmount(0);
       if (absY < 30) { setSwipeHint(''); return; }
       const deltaY = touchStartY.current - e.touches[0].clientY;
       const hint = deltaY > 0 ? 'next' : 'prev';
@@ -299,8 +328,7 @@ export default function VideoPage() {
       setSpeedHint(false);
       touchStartY.current = null;
       touchStartX.current = null;
-      setSeekHint('');
-      setSwipeHint('');
+      setSeekHint(''); setSeekAmount(0); setSwipeHint('');
       return;
     }
 
@@ -309,22 +337,22 @@ export default function VideoPage() {
     const deltaX = touchStartX.current - e.changedTouches[0].clientX;
     const absY = Math.abs(deltaY);
     const absX = Math.abs(deltaX);
-    setSwipeHint('');
-    setSeekHint('');
+    setSwipeHint(''); setSeekHint(''); setSeekAmount(0);
 
     // 水平滑動（快轉 / 快退）：absX >= 40px 且比垂直更明顯
     if (absX >= 40 && absX > absY * 1.5) {
       const vid = videoRef.current;
       if (vid) {
+        const secs = calcSeek(absX);
         if (deltaX > 0) {
           // 往左滑 → 快退
-          vid.currentTime = Math.max(0, vid.currentTime - SEEK_SECS);
-          showToast(`⏪ -${SEEK_SECS}秒`);
+          vid.currentTime = Math.max(0, vid.currentTime - secs);
+          showToast(`⏪ -${secs}秒`);
         } else {
           // 往右滑 → 快轉
-          const dur = isFinite(vid.duration) ? vid.duration : vid.currentTime + SEEK_SECS;
-          vid.currentTime = Math.min(dur, vid.currentTime + SEEK_SECS);
-          showToast(`⏩ +${SEEK_SECS}秒`);
+          const dur = isFinite(vid.duration) ? vid.duration : vid.currentTime + secs;
+          vid.currentTime = Math.min(dur, vid.currentTime + secs);
+          showToast(`⏩ +${secs}秒`);
         }
       }
       touchStartY.current = null;
@@ -338,11 +366,7 @@ export default function VideoPage() {
       touchStartX.current = null;
       return;
     }
-    if (deltaY > 0) {
-      goNext();
-    } else {
-      goPrev();
-    }
+    if (deltaY > 0) goNext(); else goPrev();
     touchStartY.current = null;
     touchStartX.current = null;
   }, [goNext, goPrev, showToast]);
@@ -484,16 +508,16 @@ export default function VideoPage() {
             </div>
           )}
 
-          {/* 快轉 / 快退 提示 overlay */}
-          {seekHint && (
+          {/* 快轉 / 快退 提示 overlay（即時顯示秒數） */}
+          {seekHint && seekAmount > 0 && (
             <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center',
               justifyContent: seekHint === 'forward' ? 'flex-end' : 'flex-start',
-              pointerEvents: 'none', zIndex: 15, padding: '0 28px' }}>
-              <div style={{ background: 'rgba(0,0,0,0.55)', borderRadius: 14, padding: '10px 18px',
+              pointerEvents: 'none', zIndex: 15, padding: '0 24px' }}>
+              <div style={{ background: 'rgba(0,0,0,0.65)', borderRadius: 16, padding: '12px 20px',
                 display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
-                <span style={{ fontSize: 28 }}>{seekHint === 'forward' ? '⏩' : '⏪'}</span>
-                <span style={{ color: '#fff', fontSize: 13, fontWeight: 700 }}>
-                  {seekHint === 'forward' ? `+${SEEK_SECS}秒` : `-${SEEK_SECS}秒`}
+                <span style={{ fontSize: 30 }}>{seekHint === 'forward' ? '⏩' : '⏪'}</span>
+                <span style={{ color: '#facc15', fontSize: 16, fontWeight: 800 }}>
+                  {seekHint === 'forward' ? `+${seekAmount}秒` : `-${seekAmount}秒`}
                 </span>
               </div>
             </div>
