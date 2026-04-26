@@ -24,7 +24,10 @@ export default async function handler(req, res) {
     chatId, msgId, accessHash, chatType, mimeType = 'video/mp4', accountId,
     fileSize: fileSizeParam,
     docId, docAccessHash, docFileRef,
+    download,   // '1' → 全檔下載模式（不限 chunk，帶 Content-Disposition）
+    dlTitle,    // 下載檔案名稱
   } = req.query;
+  const isDownload = download === '1';
 
   // ── 認證檢查 ────────────────────────────────────────────────────────────────
   const account = getActiveAccount(req, accountId);
@@ -68,6 +71,32 @@ export default async function handler(req, res) {
       doc         = msg.media.document;
       fileSize    = Number(doc.size || 0);
       contentType = doc.mimeType || mimeType;
+    }
+
+    // ── 下載模式：全檔串流，帶 Content-Disposition attachment ────────────────
+    if (isDownload) {
+      const safeName = (dlTitle || 'video').replace(/[\\/:*?"<>|]/g, '_').trim();
+      const encoded  = encodeURIComponent(safeName + '.mp4');
+      res.writeHead(200, {
+        'Content-Type':        contentType,
+        'Content-Disposition': `attachment; filename*=UTF-8''${encoded}`,
+        'Content-Length':      fileSize || undefined,
+        'Cache-Control':       'no-store',
+      });
+      for await (const chunk of client.iterDownload({
+        file: new Api.InputDocumentFileLocation({
+          id: doc.id, accessHash: doc.accessHash,
+          fileReference: doc.fileReference, thumbSize: '',
+        }),
+        offset: bigInt(0),
+        requestSize: PART_SIZE,
+      })) {
+        if (res.writableEnded || res.destroyed) break;
+        const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        res.write(data);
+      }
+      if (!res.writableEnded) res.end();
+      return;
     }
 
     // ── 解析 Range header ─────────────────────────────────────────────────────

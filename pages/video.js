@@ -89,10 +89,11 @@ export default function VideoPage() {
   const videoRef         = useRef(null);
   const navigating       = useRef(false);
   const wasFullscreenRef = useRef(false); // 跳下一支前記錄是否在全螢幕
-  // ── 長按 2x ──────────────────────────────────────────────────────────────────
-  const longPressTimer      = useRef(null);
-  const is2xMode            = useRef(false);
-  const videoContainerRef   = useRef(null); // 影片容器（含黑邊）用於上下半判斷
+  // ── 長按計時 ─────────────────────────────────────────────────────────────────
+  const longPressTimer         = useRef(null); // 上半部 500ms（加入最愛）／下半部 500ms（2x）
+  const longPressDownloadTimer = useRef(null); // 上半部 3000ms（下載）
+  const is2xMode               = useRef(false);
+  const videoContainerRef      = useRef(null); // 影片容器（含黑邊）用於上下半判斷
 
   const videoId = chatId && msgId ? `${chatId}_${msgId}` : null;
 
@@ -255,19 +256,19 @@ export default function VideoPage() {
     touchStartY.current = e.touches[0].clientY;
     touchStartX.current = e.touches[0].clientX;
     clearTimeout(longPressTimer.current);
+    clearTimeout(longPressDownloadTimer.current);
 
-    // 在 touchstart 時就判斷上下半部，分別設定不同計時
+    // 在 touchstart 時判斷上下半部，分別啟動不同計時器
     const container = videoContainerRef.current;
     if (!container) return;
     const rect = container.getBoundingClientRect();
     const ty = e.touches[0].clientY;
     const tx = e.touches[0].clientX;
-
-    // 確認按壓在影片容器範圍內
     if (tx < rect.left || tx > rect.right || ty < rect.top || ty > rect.bottom) return;
 
     if (ty < rect.top + rect.height / 2) {
-      // ── 上半部：長按 5 秒 → 儲存 / 取消最愛 ────────────────────────────
+      // ── 上半部 ───────────────────────────────────────────────────────────
+      // 500ms → 加入最愛
       longPressTimer.current = setTimeout(() => {
         if (!videoId) return;
         const video = {
@@ -279,28 +280,51 @@ export default function VideoPage() {
         };
         const added = toggleFavorite(video);
         setFav(added);
-        showToast(added ? '❤️ 長按儲存影片' : '🤍 已從最愛移除');
-      }, 5000); // 5 秒
+        showToast(added ? '❤️ 已加入最愛（繼續按 3 秒可下載）' : '🤍 已從最愛移除');
+      }, 500);
+      // 3000ms → 下載影片
+      longPressDownloadTimer.current = setTimeout(() => {
+        if (!chatId || !msgId) return;
+        const dlUrl = `/api/stream?chatId=${chatId}&msgId=${msgId}` +
+          `&accessHash=${encodeURIComponent(accessHash||'')}` +
+          `&chatType=${chatType}&mimeType=${encodeURIComponent(mimeType||'video/mp4')}` +
+          `&accountId=${accountId}&fileSize=${fileSize||0}` +
+          `&docId=${encodeURIComponent(docId||'')}` +
+          `&docAccessHash=${encodeURIComponent(docAccessHash||'')}` +
+          `&docFileRef=${encodeURIComponent(docFileRef||'')}` +
+          `&download=1&dlTitle=${encodeURIComponent(title || chatTitle || 'video')}`;
+        const a = document.createElement('a');
+        a.href = dlUrl;
+        a.download = `${(title || chatTitle || 'video').replace(/[\\/:*?"<>|]/g, '_')}.mp4`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        showToast('⬇️ 開始下載影片…');
+      }, 3000);
     } else {
-      // ── 下半部：長按 500ms → 2x 快速播放 ──────────────────────────────
+      // ── 下半部：500ms → 2x 快速播放 ─────────────────────────────────────
       longPressTimer.current = setTimeout(() => {
         const vid = videoRef.current;
         if (!vid) return;
         is2xMode.current = true;
         vid.playbackRate = 2;
         setSpeedHint(true);
-      }, 500); // 0.5 秒
+      }, 500);
     }
-  }, [videoId, chatId, msgId, accessHash, chatType, mimeType, accountId,   // eslint-disable-line
-      title, chatTitle, date, duration, fileSize, hasThumbnail, showToast]); // eslint-disable-line
+  }, [videoId, chatId, msgId, accessHash, chatType, mimeType, accountId,       // eslint-disable-line
+      title, chatTitle, date, duration, fileSize, hasThumbnail,                 // eslint-disable-line
+      docId, docAccessHash, docFileRef, showToast]);                            // eslint-disable-line
 
   const handleTouchMove = useCallback((e) => {
     if (touchStartY.current === null) return;
     const absY = Math.abs(touchStartY.current - e.touches[0].clientY);
     const absX = Math.abs(touchStartX.current - e.touches[0].clientX);
 
-    // 手指移動 > 10px → 取消長按
-    if (absY > 10 || absX > 10) clearTimeout(longPressTimer.current);
+    // 手指移動 > 10px → 取消所有長按計時
+    if (absY > 10 || absX > 10) {
+      clearTimeout(longPressTimer.current);
+      clearTimeout(longPressDownloadTimer.current);
+    }
 
     if (absX > absY) {
       // 水平滑動 → 快轉 / 快退提示（即時顯示秒數）
@@ -325,6 +349,7 @@ export default function VideoPage() {
 
   const handleTouchEnd = useCallback((e) => {
     clearTimeout(longPressTimer.current);
+    clearTimeout(longPressDownloadTimer.current); // 放開手指取消下載計時
 
     // 放開時若在 2x 模式 → 恢復 1x
     if (is2xMode.current) {
