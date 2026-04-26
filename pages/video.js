@@ -26,6 +26,16 @@ function fmtDate(unix) {
   return new Date(unix * 1000).toLocaleDateString('zh-TW', { year:'numeric', month:'short', day:'numeric' });
 }
 
+function CastSpinner() {
+  return (
+    <svg width={14} height={14} viewBox="0 0 24 24"
+      style={{ animation: 'spin 0.8s linear infinite', flexShrink: 0 }}>
+      <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor"
+        strokeWidth="3" strokeDasharray="31.4" strokeDashoffset="10" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function NavBar({ active }) {
   const items = [
     { href: '/', icon: '🏠', label: '首頁', key: 'home' },
@@ -52,19 +62,27 @@ export default function VideoPage() {
     chatId, msgId, accessHash, chatType, mimeType, accountId,
     title, chatTitle, date, duration, fileSize, hasThumbnail,
     docId, docAccessHash, docFileRef,
+    autoFullscreen,   // 'true' 時自動進入全螢幕（從全螢幕播完後自動跳下一支）
   } = query;
 
-  const [fav, setFav] = useState(false);
-  const [toast, setToast] = useState('');
-  const [playlist, setPlaylist] = useState([]);
+  const [fav, setFav]             = useState(false);
+  const [toast, setToast]         = useState('');
+  const [playlist, setPlaylist]   = useState([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
-  const [swipeHint, setSwipeHint] = useState(''); // 'next' | 'prev' | ''
-  const toastTimer = useRef(null);
-  const swipeHintTimer = useRef(null);
-  const touchStartY = useRef(null);
-  const touchStartX = useRef(null);
-  const videoRef = useRef(null);
-  const navigating = useRef(false);
+  const [swipeHint, setSwipeHint] = useState('');
+  // ── 全螢幕 ──────────────────────────────────────────────────────────────────
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  // ── 投影（AirPlay / Remote Playback）────────────────────────────────────────
+  // 'unavailable' | 'available' | 'connecting' | 'connected'
+  const [castState, setCastState] = useState('unavailable');
+
+  const toastTimer       = useRef(null);
+  const swipeHintTimer   = useRef(null);
+  const touchStartY      = useRef(null);
+  const touchStartX      = useRef(null);
+  const videoRef         = useRef(null);
+  const navigating       = useRef(false);
+  const wasFullscreenRef = useRef(false); // 跳下一支前記錄是否在全螢幕
 
   const videoId = chatId && msgId ? `${chatId}_${msgId}` : null;
 
@@ -96,6 +114,63 @@ export default function VideoPage() {
     navigating.current = false;
   }, [chatId, msgId, accountId]);
 
+  // ── 全螢幕狀態追蹤 ────────────────────────────────────────────────────────
+  useEffect(() => {
+    const onChange = () => {
+      const fs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+      setIsFullscreen(fs);
+      wasFullscreenRef.current = fs;
+    };
+    document.addEventListener('fullscreenchange',       onChange);
+    document.addEventListener('webkitfullscreenchange', onChange);
+    return () => {
+      document.removeEventListener('fullscreenchange',       onChange);
+      document.removeEventListener('webkitfullscreenchange', onChange);
+    };
+  }, []);
+
+  // ── 自動全螢幕（從全螢幕播完後跳到下一支時觸發）─────────────────────────
+  useEffect(() => {
+    if (autoFullscreen !== 'true') return;
+    const vid = videoRef.current;
+    if (!vid) return;
+    let done = false;
+    const tryFS = () => {
+      if (done) return; done = true;
+      const req = vid.requestFullscreen || vid.webkitRequestFullscreen || vid.webkitEnterFullscreen;
+      if (req) req.call(vid).catch(() => {});
+    };
+    // canplay 時觸發，或 500ms fallback
+    vid.addEventListener('canplay', tryFS, { once: true });
+    const t = setTimeout(tryFS, 500);
+    return () => { vid.removeEventListener('canplay', tryFS); clearTimeout(t); };
+  }, [autoFullscreen, streamUrl]); // eslint-disable-line
+
+  // ── 投影可用性偵測（AirPlay + Remote Playback API）───────────────────────
+  useEffect(() => {
+    const vid = videoRef.current;
+    if (!vid) return;
+
+    // Remote Playback API（Chrome → Chromecast / Android TV）
+    if (vid.remote) {
+      vid.remote.watchAvailability(available => {
+        if (available) setCastState(s => s === 'connected' ? s : 'available');
+      }).catch(() => {});
+      vid.remote.onconnecting = () => setCastState('connecting');
+      vid.remote.onconnect    = () => setCastState('connected');
+      vid.remote.ondisconnect = () => setCastState('available');
+    }
+
+    // AirPlay（Safari / iOS → Apple TV / AirPlay 電視）
+    if (typeof window !== 'undefined' && window.WebKitPlaybackTargetAvailabilityEvent) {
+      const onAP = (e) => {
+        if (e.availability === 'available') setCastState(s => s === 'connected' ? s : 'available');
+      };
+      vid.addEventListener('webkitplaybacktargetavailabilitychanged', onAP);
+      return () => vid.removeEventListener('webkitplaybacktargetavailabilitychanged', onAP);
+    }
+  }, [streamUrl]); // eslint-disable-line
+
   const showToast = useCallback((msg) => {
     setToast(msg);
     clearTimeout(toastTimer.current);
@@ -115,6 +190,8 @@ export default function VideoPage() {
       fileSize: video.fileSize || 0, hasThumbnail: video.hasThumbnail ? 'true' : 'false',
       docId: video.docId || '', docAccessHash: video.docAccessHash || '',
       docFileRef: video.docFileRef || '',
+      // 若目前在全螢幕，下一支也自動全螢幕
+      autoFullscreen: wasFullscreenRef.current ? 'true' : 'false',
     });
     router.replace(`/video?${p}`);
   }, [router]);
@@ -184,6 +261,20 @@ export default function VideoPage() {
     touchStartX.current = null;
   }, [goNext, goPrev]);
 
+  // ── 投影：Remote Playback API（Chromecast）先，再 AirPlay fallback ────────
+  const handleCast = useCallback(async () => {
+    const vid = videoRef.current;
+    if (!vid) return;
+    // Remote Playback API（Chromecast / Android TV）
+    if (vid.remote) {
+      try { await vid.remote.requestRemotePlayback(); return; } catch {}
+    }
+    // AirPlay picker（Apple TV / AirPlay 電視）
+    if (vid.webkitShowPlaybackTargetPicker) {
+      vid.webkitShowPlaybackTargetPicker();
+    }
+  }, []);
+
   const handleFav = () => {
     if (!videoId) return;
     const video = {
@@ -228,6 +319,7 @@ export default function VideoPage() {
         @keyframes fadeSlideUp { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:none; } }
         @keyframes fadeSlideDown { from { opacity:0; transform:translateY(-12px); } to { opacity:1; transform:none; } }
         @keyframes pulse { 0%,100% { opacity:0.7; transform:scale(1); } 50% { opacity:1; transform:scale(1.15); } }
+        @keyframes spin { to { transform: rotate(360deg); } }
       `}</style>
 
       {/* Full-page swipe container */}
@@ -252,6 +344,27 @@ export default function VideoPage() {
           {posLabel && (
             <span style={{ fontSize: 11, color: '#52525b', flexShrink: 0, whiteSpace: 'nowrap' }}>{posLabel}</span>
           )}
+          {/* 投影按鈕（AirPlay / Chromecast 可用時才顯示） */}
+          {castState !== 'unavailable' && (
+            <button
+              onClick={handleCast}
+              title={castState === 'connected' ? '投影中（點擊中斷）' : '投影到電視'}
+              style={{ background: castState === 'connected' ? '#7c3aed22' : 'none',
+                border: castState === 'connected' ? '1px solid #7c3aed55' : 'none',
+                borderRadius: 8, padding: '4px 8px', cursor: 'pointer', flexShrink: 0,
+                display: 'flex', alignItems: 'center', gap: 4,
+                color: castState === 'connected' ? '#a78bfa'
+                     : castState === 'connecting' ? '#71717a' : '#a1a1aa',
+                fontSize: 13, fontWeight: 600, fontFamily: 'inherit',
+                transition: 'all 0.2s' }}>
+              {castState === 'connecting'
+                ? <><CastSpinner />投影中…</>
+                : castState === 'connected'
+                  ? <>📺 投影中</>
+                  : <>📺 投影</>
+              }
+            </button>
+          )}
           <button
             onClick={handleFav}
             title={fav ? '從最愛移除' : '加入最愛'}
@@ -272,6 +385,7 @@ export default function VideoPage() {
               autoPlay
               playsInline
               preload="auto"
+              x-webkit-airplay="allow"
               onEnded={handleEnded}
               onWaiting={() => {}}
               style={{ width: '100%', maxHeight: '75vh', display: 'block' }}
