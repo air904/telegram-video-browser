@@ -90,8 +90,9 @@ export default function VideoPage() {
   const navigating       = useRef(false);
   const wasFullscreenRef = useRef(false); // 跳下一支前記錄是否在全螢幕
   // ── 長按 2x ──────────────────────────────────────────────────────────────────
-  const longPressTimer   = useRef(null);
-  const is2xMode         = useRef(false);
+  const longPressTimer      = useRef(null);
+  const is2xMode            = useRef(false);
+  const videoContainerRef   = useRef(null); // 影片容器（含黑邊）用於上下半判斷
 
   const videoId = chatId && msgId ? `${chatId}_${msgId}` : null;
 
@@ -260,8 +261,9 @@ export default function VideoPage() {
       const vid = videoRef.current;
       if (!vid) return;
 
-      // 確認按壓位置在影片元素範圍內
-      const rect = vid.getBoundingClientRect();
+      // 以影片「容器 div」的範圍判斷上下半（比 video 元素本身更準確）
+      const container = videoContainerRef.current || vid;
+      const rect = container.getBoundingClientRect();
       const ty = touchStartY.current, tx = touchStartX.current;
       if (tx < rect.left || tx > rect.right || ty < rect.top || ty > rect.bottom) return;
 
@@ -477,7 +479,7 @@ export default function VideoPage() {
         </header>
 
         {/* Video player */}
-        <div style={{ background: '#000', position: 'relative' }}>
+        <div ref={videoContainerRef} style={{ background: '#000', position: 'relative' }}>
           {isReady ? (
             <video
               ref={videoRef}
@@ -490,7 +492,14 @@ export default function VideoPage() {
               x-webkit-airplay="allow"
               onEnded={handleEnded}
               onWaiting={() => {}}
-              style={{ width: '100%', maxHeight: '75vh', display: 'block' }}
+              onContextMenu={(e) => e.preventDefault()}
+              style={{
+                width: '100%', maxHeight: '75vh', display: 'block',
+                // 阻止 iOS/Android 長按彈出原生「儲存影片」對話框
+                WebkitTouchCallout: 'none',
+                WebkitUserSelect: 'none',
+                userSelect: 'none',
+              }}
             />
           ) : (
             <div style={{ width: '100%', aspectRatio: '16/9', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#52525b', fontSize: 14 }}>

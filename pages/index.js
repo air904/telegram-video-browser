@@ -420,10 +420,10 @@ export default function Home() {
 
   // ── Display filters（全部 client-side，不觸發重掃）────────────────────────
   const [search, setSearch]               = useState('');
-  const [minDuration, setMinDuration]     = useState(10);
-  const [maxDuration, setMaxDuration]     = useState(180);
+  const [minDuration, setMinDuration]     = useState(0);     // 預設不限
+  const [maxDuration, setMaxDuration]     = useState(99999); // 預設不限
   const [videosPerGroup, setVideosPerGroup] = useState(50);
-  const [days, setDays]                   = useState(7);
+  const [days, setDays]                   = useState(0);     // 預設不限
 
   // ── 其他 ──────────────────────────────────────────────────────────────────
   const [favIds, setFavIds]               = useState(new Set());
