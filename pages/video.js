@@ -3,6 +3,9 @@
  * ・播放完畢自動跳下一支
  * ・螢幕上滑 → 下一支
  * ・螢幕下滑 → 上一支
+ * ・螢幕右滑 → 快轉 +10 秒
+ * ・螢幕左滑 → 快退 -10 秒
+ * ・長按影片  → 2x 快速播放（放開恢復 1x）
  */
 import { useRouter } from 'next/router';
 import { useEffect, useState, useRef, useCallback } from 'react';
@@ -69,7 +72,9 @@ export default function VideoPage() {
   const [toast, setToast]         = useState('');
   const [playlist, setPlaylist]   = useState([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
-  const [swipeHint, setSwipeHint] = useState('');
+  const [swipeHint, setSwipeHint] = useState(''); // 'next'|'prev'
+  const [seekHint,  setSeekHint]  = useState(''); // 'forward'|'back'
+  const [speedHint, setSpeedHint] = useState(false); // 2x 快速播放 overlay
   // ── 全螢幕 ──────────────────────────────────────────────────────────────────
   const [isFullscreen, setIsFullscreen] = useState(false);
   // ── 投影（AirPlay / Remote Playback）────────────────────────────────────────
@@ -83,6 +88,9 @@ export default function VideoPage() {
   const videoRef         = useRef(null);
   const navigating       = useRef(false);
   const wasFullscreenRef = useRef(false); // 跳下一支前記錄是否在全螢幕
+  // ── 長按 2x ──────────────────────────────────────────────────────────────────
+  const longPressTimer   = useRef(null);
+  const is2xMode         = useRef(false);
 
   const videoId = chatId && msgId ? `${chatId}_${msgId}` : null;
 
@@ -232,32 +240,100 @@ export default function VideoPage() {
     }
   }, [currentIndex, playlist, goNext, showToast]);
 
-  // Touch swipe detection
+  // ── 觸控手勢偵測 ─────────────────────────────────────────────────────────────
+  // deltaX > 0 → 手指往左移 → 快退；deltaX < 0 → 手指往右移 → 快轉
+  // deltaY > 0 → 手指往上移 → 下一支；deltaY < 0 → 手指往下移 → 上一支
+  const SEEK_SECS = 10;
+
   const handleTouchStart = useCallback((e) => {
     touchStartY.current = e.touches[0].clientY;
     touchStartX.current = e.touches[0].clientX;
+
+    // 長按計時（500ms 觸發 2x 快速播放）
+    clearTimeout(longPressTimer.current);
+    longPressTimer.current = setTimeout(() => {
+      const vid = videoRef.current;
+      if (!vid) return;
+      is2xMode.current = true;
+      vid.playbackRate = 2;
+      setSpeedHint(true);
+    }, 500);
   }, []);
 
   const handleTouchMove = useCallback((e) => {
     if (touchStartY.current === null) return;
-    const deltaY = touchStartY.current - e.touches[0].clientY;
-    if (Math.abs(deltaY) < 30) { setSwipeHint(''); return; }
-    const hint = deltaY > 0 ? 'next' : 'prev';
-    if (hint !== swipeHint) {
-      setSwipeHint(hint);
-      clearTimeout(swipeHintTimer.current);
-      swipeHintTimer.current = setTimeout(() => setSwipeHint(''), 1200);
+    const absY = Math.abs(touchStartY.current - e.touches[0].clientY);
+    const absX = Math.abs(touchStartX.current - e.touches[0].clientX);
+
+    // 手指移動 > 10px → 取消長按
+    if (absY > 10 || absX > 10) clearTimeout(longPressTimer.current);
+
+    if (absX > absY) {
+      // 水平滑動 → 快轉 / 快退提示
+      setSwipeHint('');
+      if (absX < 30) { setSeekHint(''); return; }
+      const deltaX = touchStartX.current - e.touches[0].clientX;
+      setSeekHint(deltaX > 0 ? 'back' : 'forward');
+    } else {
+      // 垂直滑動 → 切換影片提示
+      setSeekHint('');
+      if (absY < 30) { setSwipeHint(''); return; }
+      const deltaY = touchStartY.current - e.touches[0].clientY;
+      const hint = deltaY > 0 ? 'next' : 'prev';
+      if (hint !== swipeHint) {
+        setSwipeHint(hint);
+        clearTimeout(swipeHintTimer.current);
+        swipeHintTimer.current = setTimeout(() => setSwipeHint(''), 1200);
+      }
     }
   }, [swipeHint]);
 
   const handleTouchEnd = useCallback((e) => {
+    clearTimeout(longPressTimer.current);
+
+    // 放開時若在 2x 模式 → 恢復 1x
+    if (is2xMode.current) {
+      is2xMode.current = false;
+      const vid = videoRef.current;
+      if (vid) vid.playbackRate = 1;
+      setSpeedHint(false);
+      touchStartY.current = null;
+      touchStartX.current = null;
+      setSeekHint('');
+      setSwipeHint('');
+      return;
+    }
+
     if (touchStartY.current === null) return;
     const deltaY = touchStartY.current - e.changedTouches[0].clientY;
     const deltaX = touchStartX.current - e.changedTouches[0].clientX;
+    const absY = Math.abs(deltaY);
+    const absX = Math.abs(deltaX);
     setSwipeHint('');
+    setSeekHint('');
 
-    // Require mostly-vertical swipe, >= 60px
-    if (Math.abs(deltaY) < 60 || Math.abs(deltaY) < Math.abs(deltaX) * 1.5) {
+    // 水平滑動（快轉 / 快退）：absX >= 40px 且比垂直更明顯
+    if (absX >= 40 && absX > absY * 1.5) {
+      const vid = videoRef.current;
+      if (vid) {
+        if (deltaX > 0) {
+          // 往左滑 → 快退
+          vid.currentTime = Math.max(0, vid.currentTime - SEEK_SECS);
+          showToast(`⏪ -${SEEK_SECS}秒`);
+        } else {
+          // 往右滑 → 快轉
+          const dur = isFinite(vid.duration) ? vid.duration : vid.currentTime + SEEK_SECS;
+          vid.currentTime = Math.min(dur, vid.currentTime + SEEK_SECS);
+          showToast(`⏩ +${SEEK_SECS}秒`);
+        }
+      }
+      touchStartY.current = null;
+      touchStartX.current = null;
+      return;
+    }
+
+    // 垂直滑動（切換影片）：absY >= 60px 且比水平更明顯
+    if (absY < 60 || absY < absX * 1.5) {
       touchStartY.current = null;
       touchStartX.current = null;
       return;
@@ -269,7 +345,7 @@ export default function VideoPage() {
     }
     touchStartY.current = null;
     touchStartX.current = null;
-  }, [goNext, goPrev]);
+  }, [goNext, goPrev, showToast]);
 
   // ── 投影：Remote Playback API（Chromecast）先，再 AirPlay fallback ────────
   const handleCast = useCallback(async () => {
@@ -321,6 +397,7 @@ export default function VideoPage() {
         @keyframes fadeSlideDown { from { opacity:0; transform:translateY(-12px); } to { opacity:1; transform:none; } }
         @keyframes pulse { 0%,100% { opacity:0.7; transform:scale(1); } 50% { opacity:1; transform:scale(1.15); } }
         @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes popIn { 0% { opacity:0; transform:translateX(-50%) scale(0.8); } 100% { opacity:1; transform:translateX(-50%) scale(1); } }
       `}</style>
 
       {/* Full-page swipe container */}
@@ -394,6 +471,31 @@ export default function VideoPage() {
           ) : (
             <div style={{ width: '100%', aspectRatio: '16/9', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#52525b', fontSize: 14 }}>
               載入中…
+            </div>
+          )}
+
+          {/* 2x 快速播放 overlay */}
+          {speedHint && (
+            <div style={{ position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
+              background: 'rgba(0,0,0,0.75)', color: '#facc15', padding: '5px 16px',
+              borderRadius: 20, fontSize: 15, fontWeight: 800, pointerEvents: 'none', zIndex: 20,
+              letterSpacing: 1, animation: 'popIn 0.15s ease', whiteSpace: 'nowrap' }}>
+              ▶▶ 2x 快速播放
+            </div>
+          )}
+
+          {/* 快轉 / 快退 提示 overlay */}
+          {seekHint && (
+            <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center',
+              justifyContent: seekHint === 'forward' ? 'flex-end' : 'flex-start',
+              pointerEvents: 'none', zIndex: 15, padding: '0 28px' }}>
+              <div style={{ background: 'rgba(0,0,0,0.55)', borderRadius: 14, padding: '10px 18px',
+                display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+                <span style={{ fontSize: 28 }}>{seekHint === 'forward' ? '⏩' : '⏪'}</span>
+                <span style={{ color: '#fff', fontSize: 13, fontWeight: 700 }}>
+                  {seekHint === 'forward' ? `+${SEEK_SECS}秒` : `-${SEEK_SECS}秒`}
+                </span>
+              </div>
             </div>
           )}
 
