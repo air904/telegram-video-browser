@@ -182,6 +182,7 @@ export default function SettingsPage() {
   // ── helpers ───────────────────────────────────────────────────────────────────
   function isAllSelected(folderId) {
     const sel = selGroups[folderId];
+    // null 或 undefined = 全選；空陣列 [] = 未選任何
     return sel === null || sel === undefined;
   }
 
@@ -194,21 +195,22 @@ export default function SettingsPage() {
   function getSelectionSummary(folderId) {
     const sel = selGroups[folderId];
     if (sel === null || sel === undefined) return '全部群組';
-    if (sel.length === 0) return '全部群組';
+    if (sel.length === 0) return '未選擇群組';
     const gs = groups[folderId];
     if (gs && sel.length >= gs.length) return '全部群組';
     return `${sel.length} 個群組`;
   }
 
   // ── 全選切換 ──────────────────────────────────────────────────────────────────
+  // ✅ 全選（null） → 點擊 → ☐ 取消全部（空陣列，所有群組取消勾選）
+  // ☐ 未全選/空 → 點擊 → ✅ 全選（null）
   function toggleSelectAll(folderId) {
     if (isAllSelected(folderId)) {
-      // null → 明確列出所有群組（方便逐一取消）
-      const gs = groups[folderId] || [];
-      setSelGroups(prev => ({ ...prev, [folderId]: [...gs] }));
-      saveSelectedGroupsInFolder(folderId, [...gs]);
+      // 全選 → 取消全部選擇
+      setSelGroups(prev => ({ ...prev, [folderId]: [] }));
+      saveSelectedGroupsInFolder(folderId, []);
     } else {
-      // 回到全選（null）
+      // 非全選（部分或空）→ 回到全選
       setSelGroups(prev => ({ ...prev, [folderId]: null }));
       saveSelectedGroupsInFolder(folderId, null);
     }
@@ -226,17 +228,19 @@ export default function SettingsPage() {
     let newSel;
 
     if (current === null || current === undefined) {
-      // 全選 → 取消此群組
+      // 全選（null）→ 取消此一群組 → 明確列出其他所有群組
       newSel = gs.filter(g => g.chatId !== group.chatId);
-      if (newSel.length === 0 || newSel.length >= gs.length) newSel = null;
+      // newSel 可能是空陣列（只有一個群組時），保留空陣列讓用戶看到全部取消
     } else {
       const already = current.some(g => g.chatId === group.chatId);
       if (already) {
+        // 已選 → 取消
         newSel = current.filter(g => g.chatId !== group.chatId);
-        if (newSel.length === 0) newSel = null; // 不允許空，回到全選
+        // 允許空陣列（讓用戶可以全部取消後再重選）
       } else {
+        // 未選 → 加入
         newSel = [...current, group];
-        if (newSel.length >= gs.length) newSel = null; // 全部選了 → 改為 null
+        if (newSel.length >= gs.length) newSel = null; // 全部選了 → 改為 null（全選）
       }
     }
 
