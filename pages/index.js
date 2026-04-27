@@ -9,6 +9,7 @@ import {
   getFolderGroups, saveFolderGroups,
   getSelectedGroupsInFolder,
   saveCachedVideos, getCachedVideos, clearCachedVideos,
+  clearAllAccountCaches,
 } from '../lib/storage';
 
 // ─── 硬編碼 API 憑證 ──────────────────────────────────────────────────────────
@@ -507,6 +508,13 @@ export default function Home() {
       maxDuration: 99999,
     });
 
+    // folderToScan === null → 尚未選擇文件夾，不啟動掃描
+    if (folderToScan === null || folderToScan === undefined) {
+      setScanning(false); setScanDone(true);
+      if (scanTimeoutRef.current) { clearTimeout(scanTimeoutRef.current); scanTimeoutRef.current = null; }
+      return;
+    }
+
     // 決定掃描模式
     if (folderToScan !== null && folderToScan !== undefined) {
       const userSelectedGroups = getSelectedGroupsInFolder(folderToScan);
@@ -669,20 +677,38 @@ export default function Home() {
 
   // ── Account management ────────────────────────────────────────────────────
   async function handleSwitch(id) {
-    clearCachedVideos(); setAllVideos([]);
+    // 1. 立刻關閉目前掃描，清除所有舊帳號快取（群組 / 文件夾資料與新帳號無關）
+    if (esRef.current) { esRef.current.close(); esRef.current = null; }
+    if (scanTimeoutRef.current) { clearTimeout(scanTimeoutRef.current); scanTimeoutRef.current = null; }
+    setScanning(false); setScanDone(false);
+    pendingRef.current = [];
+    clearCachedVideos();
+    clearAllAccountCaches();   // 清除 tg_fg_* / tg_sel_* / tg_known_folders
+    setAllVideos([]);
+
+    // 2. 切換帳號（server 寫 cookie）
     await api('/api/accounts?action=switch', { method: 'POST', body: { id } });
     setActiveId(id);
     setAccounts(prev => prev.map(a => ({ ...a, active: a.id === id })));
+
+    // 3. 稍等讓舊 Lambda 的 Telegram 連線釋放，再開新掃描
+    await new Promise(r => setTimeout(r, 800));
     doScan(id);
   }
   async function handleLogout(id) {
-    clearCachedVideos(); setAllVideos([]);
+    if (esRef.current) { esRef.current.close(); esRef.current = null; }
+    if (scanTimeoutRef.current) { clearTimeout(scanTimeoutRef.current); scanTimeoutRef.current = null; }
+    setScanning(false);
+    pendingRef.current = [];
+    clearCachedVideos();
+    clearAllAccountCaches();
+    setAllVideos([]);
     await api('/api/accounts?action=logout', { method: 'POST', body: { id } });
     const data = await api('/api/accounts');
     setAccounts(data.accounts || []);
     setActiveId(data.activeAccountId);
     if (!data.accounts?.length) setView('login');
-    else doScan(data.activeAccountId);
+    else { await new Promise(r => setTimeout(r, 800)); doScan(data.activeAccountId); }
   }
   function handleLoggedIn(account) {
     clearCachedVideos(); setAllVideos([]);
