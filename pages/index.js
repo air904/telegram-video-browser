@@ -781,7 +781,7 @@ export default function Home() {
   }, []);
 
   // ── Render ────────────────────────────────────────────────────────────────
-  const known         = getKnownFolders();
+  const known         = getKnownFolders(activeId);
   const isFirstTime   = known.length === 0;      // 從未取得過文件夾
   const noSelection   = !isFirstTime && selectedFolderId === null;  // 有文件夾但未選
   const hasGroups     = !isFirstTime && selectedFolderId !== null;  // 已選文件夾
