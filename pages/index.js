@@ -109,11 +109,11 @@ function Toast({message}) {
 }
 
 // ─── Login Wizard ─────────────────────────────────────────────────────────────
-function LoginPage({onLoggedIn}) {
+function LoginPage({onLoggedIn, initialPhone='', reloginMessage=''}) {
   const [step,setStep]=useState('phone');
   const [loading,setLoading]=useState(false);
   const [error,setError]=useState('');
-  const [form,setForm]=useState({phone:'',code:'',password:'',phoneCodeHash:'',sessionAfterCode:'',partialSession:''});
+  const [form,setForm]=useState({phone:initialPhone,code:'',password:'',phoneCodeHash:'',sessionAfterCode:'',partialSession:''});
   const [countdown,setCountdown]=useState(0);
   const set=(k)=>(e)=>setForm(f=>({...f,[k]:e.target.value}));
   const err=(e)=>{setError(e.message||String(e));setLoading(false);};
@@ -163,6 +163,12 @@ function LoginPage({onLoggedIn}) {
           <h1 style={{fontSize:24,fontWeight:700,color:'#f4f4f5'}}>Telegram 影片瀏覽器</h1>
           <p style={{color:'#71717a',marginTop:6}}>瀏覽群組中的所有影片</p>
         </div>
+        {reloginMessage&&(
+          <div style={{background:'#78350f22',border:'1px solid #92400e55',borderRadius:10,
+            padding:'10px 16px',color:'#fbbf24',fontSize:13,marginBottom:24,textAlign:'center'}}>
+            ⚠️ {reloginMessage}
+          </div>
+        )}
         <div style={{display:'flex',gap:6,marginBottom:32,justifyContent:'center'}}>
           {Object.entries(stepLabels).map(([k,label],i)=>(
             <div key={k} style={{display:'flex',alignItems:'center',gap:6,opacity:step===k?1:0.35,transition:'opacity 0.2s'}}>
@@ -431,6 +437,9 @@ export default function Home() {
   const [selectedFolderId, setSelectedFolderId] = useState(null); // null=未選, 0=全部, N=指定文件夾
   const [toast, setToast]                 = useState('');
 
+  // ── 重新登入（切換帳號後 session 失效時使用）───────────────────────────────
+  const [reloginPhone, setReloginPhone]   = useState('');
+
   const esRef           = useRef(null);
   const toastTimer      = useRef(null);
   const prevFolderRef   = useRef(undefined); // 追蹤上次文件夾選擇
@@ -691,8 +700,23 @@ export default function Home() {
     setActiveId(id);
     setAccounts(prev => prev.map(a => ({ ...a, active: a.id === id })));
 
-    // 3. 稍等讓舊 Lambda 的 Telegram 連線釋放，再開新掃描
+    // 3. 稍等讓舊 Lambda 的 Telegram 連線釋放
     await new Promise(r => setTimeout(r, 800));
+
+    // 4. 檢查此帳號的 session 是否仍然有效
+    try {
+      const check = await api(`/api/auth/check?accountId=${id}`);
+      if (!check.authorized) {
+        // Session 已失效 → 顯示重新登入頁，電話號碼預先填入
+        setReloginPhone(check.phone || '');
+        setView('login');
+        return;
+      }
+    } catch {
+      // 若 check 本身失敗（網路問題），仍嘗試掃描讓 SSE 自然報錯
+    }
+
+    // 5. Session 有效 → 正常開始掃描
     doScan(id);
   }
   async function handleLogout(id) {
@@ -712,6 +736,7 @@ export default function Home() {
   }
   function handleLoggedIn(account) {
     clearCachedVideos(); setAllVideos([]);
+    setReloginPhone('');
     setAccounts(prev => { const next = prev.filter(a => a.id !== account.id); return [...next, account]; });
     setActiveId(account.id);
     setView('main_scan');
@@ -771,7 +796,11 @@ export default function Home() {
         button{border:none;background:none;font-family:inherit;}
         @keyframes spin{to{transform:rotate(360deg);}}
       `}</style>
-      <LoginPage onLoggedIn={handleLoggedIn}/>
+      <LoginPage
+        onLoggedIn={handleLoggedIn}
+        initialPhone={reloginPhone}
+        reloginMessage={reloginPhone ? `帳號 ${reloginPhone} 的登入狀態已失效，請重新驗證身份` : ''}
+      />
     </>
   );
 
