@@ -72,7 +72,6 @@ export default function VideoPage() {
   const [toast, setToast]         = useState('');
   const [playlist, setPlaylist]   = useState([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
-  const [tapHint,   setTapHint]   = useState('');   // 'next'|'prev'（點擊左右邊提示）
   const [seekHint,  setSeekHint]  = useState('');   // 'forward'|'back'
   const [seekAmount, setSeekAmount] = useState(0);  // 目前預計跳轉秒數（即時顯示）
   const [speedHint, setSpeedHint] = useState(false); // 2x 快速播放 overlay
@@ -83,10 +82,8 @@ export default function VideoPage() {
   const [castState, setCastState] = useState('unavailable');
 
   const toastTimer       = useRef(null);
-  const tapHintTimer     = useRef(null);
   const touchStartY      = useRef(null);
   const touchStartX      = useRef(null);
-  const touchStartTime   = useRef(null); // 用於判斷是否為快速點擊
   const videoRef         = useRef(null);
   const navigating       = useRef(false);
   const wasFullscreenRef = useRef(false); // 跳下一支前記錄是否在全螢幕
@@ -256,7 +253,6 @@ export default function VideoPage() {
   const handleTouchStart = useCallback((e) => {
     touchStartY.current   = e.touches[0].clientY;
     touchStartX.current   = e.touches[0].clientX;
-    touchStartTime.current = Date.now();
     clearTimeout(longPressTimer.current);
     clearTimeout(longPressDownloadTimer.current);
 
@@ -361,36 +357,7 @@ export default function VideoPage() {
     const deltaY  = touchStartY.current - e.changedTouches[0].clientY;
     const absX    = Math.abs(deltaX);
     const absY    = Math.abs(deltaY);
-    const elapsed = Date.now() - (touchStartTime.current || 0);
     setSeekHint(''); setSeekAmount(0);
-
-    // ── 快速點擊（< 250ms，移動 < 15px）在影片容器上 → 左右切換影片 ──────
-    if (elapsed < 250 && absX < 15 && absY < 15) {
-      const container = videoContainerRef.current;
-      if (container) {
-        const rect = container.getBoundingClientRect();
-        const tx = touchStartX.current, ty = touchStartY.current;
-        if (tx >= rect.left && tx <= rect.right && ty >= rect.top && ty <= rect.bottom) {
-          const midX = rect.left + rect.width / 2;
-          if (tx > midX) {
-            // 點右側 → 下一支
-            clearTimeout(tapHintTimer.current);
-            setTapHint('next');
-            tapHintTimer.current = setTimeout(() => setTapHint(''), 300);
-            goNext();
-          } else {
-            // 點左側 → 上一支
-            clearTimeout(tapHintTimer.current);
-            setTapHint('prev');
-            tapHintTimer.current = setTimeout(() => setTapHint(''), 300);
-            goPrev();
-          }
-          touchStartY.current = null;
-          touchStartX.current = null;
-          return;
-        }
-      }
-    }
 
     // ── 水平滑動（快轉 / 快退）：absX >= 40px 且比垂直更明顯 ──────────────
     if (absX >= 40 && absX > absY * 1.5) {
@@ -413,7 +380,7 @@ export default function VideoPage() {
 
     touchStartY.current = null;
     touchStartX.current = null;
-  }, [goNext, goPrev, showToast]);
+  }, [showToast]);
 
   // ── 投影：Remote Playback API（Chromecast）先，再 AirPlay fallback ────────
   const handleCast = useCallback(async () => {
@@ -573,26 +540,6 @@ export default function VideoPage() {
             </div>
           )}
 
-          {/* 點擊左 / 右側切換影片提示 */}
-          {tapHint && (
-            <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center',
-              justifyContent: tapHint === 'next' ? 'flex-end' : 'flex-start',
-              pointerEvents: 'none', zIndex: 16, padding: '0 20px',
-              animation: 'fadeSlideUp 0.15s ease' }}>
-              <div style={{ background: 'rgba(0,0,0,0.55)', borderRadius: 14,
-                padding: '10px 16px', display: 'flex', flexDirection: 'column',
-                alignItems: 'center', gap: 4 }}>
-                <span style={{ fontSize: 28, color: '#a78bfa' }}>
-                  {tapHint === 'next' ? '▶▶' : '◀◀'}
-                </span>
-                <span style={{ color: '#fff', fontSize: 12, fontWeight: 700 }}>
-                  {tapHint === 'next'
-                    ? (hasNext ? '下一支' : '已是最後一支')
-                    : (hasPrev ? '上一支' : '已是第一支')}
-                </span>
-              </div>
-            </div>
-          )}
         </div>
 
         {/* Info panel */}
