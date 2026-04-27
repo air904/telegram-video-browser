@@ -444,7 +444,17 @@ export default function VideoPage() {
         {/* Header */}
         <header style={{ position: 'sticky', top: 0, zIndex: 50, background: 'rgba(13,13,15,0.9)', backdropFilter: 'blur(14px)', borderBottom: '1px solid #1f1f23', display: 'flex', alignItems: 'center', padding: '0 16px', height: 56, gap: 12 }}>
           <button
-            onClick={() => router.back()}
+            onClick={() => {
+              // 若在全螢幕先退出，再回上一頁（首頁）
+              if (document.fullscreenElement || document.webkitFullscreenElement) {
+                (document.exitFullscreen || document.webkitExitFullscreen || (() => {}))
+                  .call(document)
+                  .catch(() => {})
+                  .finally(() => router.back());
+              } else {
+                router.back();
+              }
+            }}
             style={{ background: 'none', color: '#a1a1aa', fontSize: 22, cursor: 'pointer', padding: '4px 8px', borderRadius: 8, lineHeight: 1, flexShrink: 0 }}
           >
             ←

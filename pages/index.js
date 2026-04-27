@@ -764,6 +764,7 @@ export default function Home() {
       // doc metadata — stream.js 用來跳過 getMessages()
       docId: video.docId||'', docAccessHash: video.docAccessHash||'',
       docFileRef: video.docFileRef||'',
+      autoFullscreen: 'true',   // 從首頁點擊直接進入全螢幕
     });
     router.push(`/video?${p}`);
   }
