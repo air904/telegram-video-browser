@@ -72,7 +72,7 @@ export default function VideoPage() {
   const [toast, setToast]         = useState('');
   const [playlist, setPlaylist]   = useState([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
-  const [swipeHint, setSwipeHint] = useState('');   // 'next'|'prev'
+  const [tapHint,   setTapHint]   = useState('');   // 'next'|'prev'（點擊左右邊提示）
   const [seekHint,  setSeekHint]  = useState('');   // 'forward'|'back'
   const [seekAmount, setSeekAmount] = useState(0);  // 目前預計跳轉秒數（即時顯示）
   const [speedHint, setSpeedHint] = useState(false); // 2x 快速播放 overlay
@@ -83,9 +83,10 @@ export default function VideoPage() {
   const [castState, setCastState] = useState('unavailable');
 
   const toastTimer       = useRef(null);
-  const swipeHintTimer   = useRef(null);
+  const tapHintTimer     = useRef(null);
   const touchStartY      = useRef(null);
   const touchStartX      = useRef(null);
+  const touchStartTime   = useRef(null); // 用於判斷是否為快速點擊
   const videoRef         = useRef(null);
   const navigating       = useRef(false);
   const wasFullscreenRef = useRef(false); // 跳下一支前記錄是否在全螢幕
@@ -253,8 +254,9 @@ export default function VideoPage() {
   const calcSeek = (absX) => (Math.floor((absX - 40) / 10) + 1) * 10;
 
   const handleTouchStart = useCallback((e) => {
-    touchStartY.current = e.touches[0].clientY;
-    touchStartX.current = e.touches[0].clientX;
+    touchStartY.current   = e.touches[0].clientY;
+    touchStartX.current   = e.touches[0].clientX;
+    touchStartTime.current = Date.now();
     clearTimeout(longPressTimer.current);
     clearTimeout(longPressDownloadTimer.current);
 
@@ -326,30 +328,21 @@ export default function VideoPage() {
       clearTimeout(longPressDownloadTimer.current);
     }
 
+    // 水平滑動 → 快轉 / 快退提示（即時顯示秒數）
     if (absX > absY) {
-      // 水平滑動 → 快轉 / 快退提示（即時顯示秒數）
-      setSwipeHint('');
       if (absX < 40) { setSeekHint(''); setSeekAmount(0); return; }
       const deltaX = touchStartX.current - e.touches[0].clientX;
       setSeekHint(deltaX > 0 ? 'back' : 'forward');
       setSeekAmount(calcSeek(absX));
     } else {
-      // 垂直滑動 → 切換影片提示
       setSeekHint(''); setSeekAmount(0);
-      if (absY < 30) { setSwipeHint(''); return; }
-      const deltaY = touchStartY.current - e.touches[0].clientY;
-      const hint = deltaY > 0 ? 'next' : 'prev';
-      if (hint !== swipeHint) {
-        setSwipeHint(hint);
-        clearTimeout(swipeHintTimer.current);
-        swipeHintTimer.current = setTimeout(() => setSwipeHint(''), 1200);
-      }
     }
-  }, [swipeHint]);
+  }, []);
 
+  /** 點擊影片左 / 右側切換影片（快速點擊 < 250ms 且移動 < 15px） */
   const handleTouchEnd = useCallback((e) => {
     clearTimeout(longPressTimer.current);
-    clearTimeout(longPressDownloadTimer.current); // 放開手指取消下載計時
+    clearTimeout(longPressDownloadTimer.current);
 
     // 放開時若在 2x 模式 → 恢復 1x
     if (is2xMode.current) {
@@ -359,28 +352,55 @@ export default function VideoPage() {
       setSpeedHint(false);
       touchStartY.current = null;
       touchStartX.current = null;
-      setSeekHint(''); setSeekAmount(0); setSwipeHint('');
+      setSeekHint(''); setSeekAmount(0);
       return;
     }
 
     if (touchStartY.current === null) return;
-    const deltaY = touchStartY.current - e.changedTouches[0].clientY;
-    const deltaX = touchStartX.current - e.changedTouches[0].clientX;
-    const absY = Math.abs(deltaY);
-    const absX = Math.abs(deltaX);
-    setSwipeHint(''); setSeekHint(''); setSeekAmount(0);
+    const deltaX  = touchStartX.current - e.changedTouches[0].clientX;
+    const deltaY  = touchStartY.current - e.changedTouches[0].clientY;
+    const absX    = Math.abs(deltaX);
+    const absY    = Math.abs(deltaY);
+    const elapsed = Date.now() - (touchStartTime.current || 0);
+    setSeekHint(''); setSeekAmount(0);
 
-    // 水平滑動（快轉 / 快退）：absX >= 40px 且比垂直更明顯
+    // ── 快速點擊（< 250ms，移動 < 15px）在影片容器上 → 左右切換影片 ──────
+    if (elapsed < 250 && absX < 15 && absY < 15) {
+      const container = videoContainerRef.current;
+      if (container) {
+        const rect = container.getBoundingClientRect();
+        const tx = touchStartX.current, ty = touchStartY.current;
+        if (tx >= rect.left && tx <= rect.right && ty >= rect.top && ty <= rect.bottom) {
+          const midX = rect.left + rect.width / 2;
+          if (tx > midX) {
+            // 點右側 → 下一支
+            clearTimeout(tapHintTimer.current);
+            setTapHint('next');
+            tapHintTimer.current = setTimeout(() => setTapHint(''), 300);
+            goNext();
+          } else {
+            // 點左側 → 上一支
+            clearTimeout(tapHintTimer.current);
+            setTapHint('prev');
+            tapHintTimer.current = setTimeout(() => setTapHint(''), 300);
+            goPrev();
+          }
+          touchStartY.current = null;
+          touchStartX.current = null;
+          return;
+        }
+      }
+    }
+
+    // ── 水平滑動（快轉 / 快退）：absX >= 40px 且比垂直更明顯 ──────────────
     if (absX >= 40 && absX > absY * 1.5) {
       const vid = videoRef.current;
       if (vid) {
         const secs = calcSeek(absX);
         if (deltaX > 0) {
-          // 往左滑 → 快退
           vid.currentTime = Math.max(0, vid.currentTime - secs);
           showToast(`⏪ -${secs}秒`);
         } else {
-          // 往右滑 → 快轉
           const dur = isFinite(vid.duration) ? vid.duration : vid.currentTime + secs;
           vid.currentTime = Math.min(dur, vid.currentTime + secs);
           showToast(`⏩ +${secs}秒`);
@@ -391,13 +411,6 @@ export default function VideoPage() {
       return;
     }
 
-    // 垂直滑動（切換影片）：absY >= 60px 且比水平更明顯
-    if (absY < 60 || absY < absX * 1.5) {
-      touchStartY.current = null;
-      touchStartX.current = null;
-      return;
-    }
-    if (deltaY > 0) goNext(); else goPrev();
     touchStartY.current = null;
     touchStartX.current = null;
   }, [goNext, goPrev, showToast]);
@@ -449,7 +462,6 @@ export default function VideoPage() {
         ::-webkit-scrollbar { width: 5px; }
         ::-webkit-scrollbar-thumb { background: #2e2e35; border-radius: 3px; }
         @keyframes fadeSlideUp { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:none; } }
-        @keyframes fadeSlideDown { from { opacity:0; transform:translateY(-12px); } to { opacity:1; transform:none; } }
         @keyframes pulse { 0%,100% { opacity:0.7; transform:scale(1); } 50% { opacity:1; transform:scale(1.15); } }
         @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes popIn { 0% { opacity:0; transform:translateX(-50%) scale(0.8); } 100% { opacity:1; transform:translateX(-50%) scale(1); } }
@@ -561,36 +573,23 @@ export default function VideoPage() {
             </div>
           )}
 
-          {/* Swipe hint overlay — next */}
-          {swipeHint === 'next' && (
-            <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.5)', pointerEvents: 'none', animation: 'fadeSlideUp 0.15s ease' }}>
-              <div style={{ textAlign: 'center', color: '#fff' }}>
-                <div style={{ fontSize: 38, animation: 'pulse 0.6s infinite' }}>⬆︎</div>
-                <p style={{ fontSize: 14, marginTop: 8, color: '#a78bfa', fontWeight: 700 }}>
-                  {hasNext ? '下一支' : '已是最後一支'}
-                </p>
-                {hasNext && (
-                  <p style={{ fontSize: 11, color: '#a1a1aa', marginTop: 4, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {playlist[currentIndex + 1]?.title || ''}
-                  </p>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* Swipe hint overlay — prev */}
-          {swipeHint === 'prev' && (
-            <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.5)', pointerEvents: 'none', animation: 'fadeSlideDown 0.15s ease' }}>
-              <div style={{ textAlign: 'center', color: '#fff' }}>
-                <div style={{ fontSize: 38, animation: 'pulse 0.6s infinite' }}>⬇︎</div>
-                <p style={{ fontSize: 14, marginTop: 8, color: '#a78bfa', fontWeight: 700 }}>
-                  {hasPrev ? '上一支' : '已是第一支'}
-                </p>
-                {hasPrev && (
-                  <p style={{ fontSize: 11, color: '#a1a1aa', marginTop: 4, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {playlist[currentIndex - 1]?.title || ''}
-                  </p>
-                )}
+          {/* 點擊左 / 右側切換影片提示 */}
+          {tapHint && (
+            <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center',
+              justifyContent: tapHint === 'next' ? 'flex-end' : 'flex-start',
+              pointerEvents: 'none', zIndex: 16, padding: '0 20px',
+              animation: 'fadeSlideUp 0.15s ease' }}>
+              <div style={{ background: 'rgba(0,0,0,0.55)', borderRadius: 14,
+                padding: '10px 16px', display: 'flex', flexDirection: 'column',
+                alignItems: 'center', gap: 4 }}>
+                <span style={{ fontSize: 28, color: '#a78bfa' }}>
+                  {tapHint === 'next' ? '▶▶' : '◀◀'}
+                </span>
+                <span style={{ color: '#fff', fontSize: 12, fontWeight: 700 }}>
+                  {tapHint === 'next'
+                    ? (hasNext ? '下一支' : '已是最後一支')
+                    : (hasPrev ? '上一支' : '已是第一支')}
+                </span>
               </div>
             </div>
           )}
