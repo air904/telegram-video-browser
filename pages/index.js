@@ -484,6 +484,8 @@ export default function Home() {
   // ── doScan：依選定文件夾掃描，永遠以最大量取回（200支/群，不限天數）────
   // displayVideos 的 days / videosPerGroup / duration 只做 client-side display filter
   const doScan = useCallback((accountId, folderId) => {
+    // accountId 必須傳入，用來讀取該帳號的設定快取
+    const accId = accountId || activeId;
     clearCachedVideos();
     if (esRef.current) { esRef.current.close(); esRef.current = null; }
     if (scanTimeoutRef.current) { clearTimeout(scanTimeoutRef.current); scanTimeoutRef.current = null; }
@@ -492,21 +494,22 @@ export default function Home() {
     setScanDone(false);
     setScanStatus('連線中…');
 
+    const folderToScan  = folderId !== undefined ? folderId : selectedFolderId;
+    // video cache key = accountId + folderId，跨帳號不會互相污染
+    const videoCacheKey = `${accId}_${folderToScan !== null && folderToScan !== undefined ? folderToScan : 'null'}`;
+
     // ── 3 分鐘逾時保護：防止 Vercel function 靜默超時後 spinner 永遠轉 ──────
     scanTimeoutRef.current = setTimeout(() => {
       if (esRef.current) { esRef.current.close(); esRef.current = null; }
       const partial = pendingRef.current;
       if (partial.length > 0) {
         setAllVideos(partial);
-        saveCachedVideos(partial, String(folderId !== undefined ? folderId : null));
+        saveCachedVideos(partial, videoCacheKey);
       }
       setScanning(false);
       setScanDone(true);
       setScanStatus(partial.length > 0 ? `掃描逾時，已取得 ${partial.length} 支` : '掃描逾時，請稍後重試');
     }, 3 * 60 * 1000);
-
-    const accId    = accountId || activeId;
-    const folderToScan = folderId !== undefined ? folderId : selectedFolderId;
 
     // 永遠以最大設定掃，display filter 再縮小
     const params = new URLSearchParams({
@@ -526,7 +529,7 @@ export default function Home() {
 
     // 決定掃描模式
     if (folderToScan !== null && folderToScan !== undefined) {
-      const userSelectedGroups = getSelectedGroupsInFolder(folderToScan);
+      const userSelectedGroups = getSelectedGroupsInFolder(folderToScan, accId);
       // userSelectedGroups: null = 全選文件夾, array = 使用者勾選的特定群組
 
       const toGroupsInfo = (gs) => gs.map(g => [
@@ -541,7 +544,7 @@ export default function Home() {
         params.set('groupsInfo', toGroupsInfo(userSelectedGroups));
       } else {
         // 全選文件夾 → 嘗試用快取群組做模式 A，否則模式 B
-        const cachedGroups = getFolderGroups(folderToScan);
+        const cachedGroups = getFolderGroups(folderToScan, accId);
         if (cachedGroups && cachedGroups.length > 0) {
           params.set('groupsInfo', toGroupsInfo(cachedGroups));
         } else {
@@ -570,8 +573,8 @@ export default function Home() {
           setAllVideos(final);
           setScanning(false); setScanStatus(''); es.close();
           setScanDone(true);
-          // 儲存快取（key = 文件夾 ID）
-          saveCachedVideos(final, String(folderToScan));
+          // 儲存快取（key = accountId_folderId）
+          saveCachedVideos(final, videoCacheKey);
           // 儲存本次掃到的群組詳情（下次 Mode A 用）
           if (folderToScan !== null && final.length > 0) {
             const groupMap = new Map();
@@ -583,7 +586,7 @@ export default function Home() {
                 });
               groupMap.get(v.chatId).count++;
             });
-            saveFolderGroups(folderToScan, [...groupMap.values()]);
+            saveFolderGroups(folderToScan, [...groupMap.values()], accId);
           }
         }
         if (msg.type === 'error') {
@@ -600,19 +603,21 @@ export default function Home() {
     };
   }, [activeId, selectedFolderId]);
 
-  // ── 掛載：載入帳號 + 文件夾設定 ─────────────────────────────────────────────
+  // ── 掛載：載入帳號 → 讀取該帳號的設定 ──────────────────────────────────────
   useEffect(() => {
-    const folderId = getSelectedFolderId();
-    const known    = getKnownFolders();
-    setSelectedFolderId(folderId);
-    prevFolderRef.current = folderId;
-
     (async () => {
       try {
         const data = await api('/api/accounts');
         if (!data.accounts?.length) { setView('login'); return; }
         setAccounts(data.accounts);
-        setActiveId(data.activeAccountId);
+        const aid = data.activeAccountId;
+        setActiveId(aid);
+
+        // 讀取此帳號自己的設定（文件夾選擇、已知文件夾）
+        const folderId = getSelectedFolderId(aid);
+        const known    = getKnownFolders(aid);
+        setSelectedFolderId(folderId);
+        prevFolderRef.current = folderId;
 
         // 尚未設定文件夾（第一次進入）→ 顯示引導
         const hasFolder = known.length > 0 && folderId !== null;
@@ -621,8 +626,8 @@ export default function Home() {
           return;
         }
 
-        // 嘗試讀取快取（從影片頁返回時）
-        const cached = getCachedVideos(String(folderId));
+        // 嘗試讀取快取（從影片頁返回時，key 含 accountId）
+        const cached = getCachedVideos(`${aid}_${folderId}`);
         if (cached && cached.length > 0) {
           setAllVideos(cached);
           setScanDone(true);
@@ -639,8 +644,8 @@ export default function Home() {
   // ── 掃描觸發：view='main_scan' 且帳號就緒時才掃 ─────────────────────────
   useEffect(() => {
     if (view === 'main_scan' && activeId) {
-      const known    = getKnownFolders();
-      const folderId = getSelectedFolderId();
+      const known    = getKnownFolders(activeId);
+      const folderId = getSelectedFolderId(activeId);
       if (known.length > 0 && folderId !== null) {
         doScan(activeId, folderId);
         setView('main');
@@ -651,14 +656,14 @@ export default function Home() {
   // ── 回到首頁時（focus）偵測文件夾是否改變 → 若改變則重掃 ────────────────
   useEffect(() => {
     const onFocus = () => {
-      const newFolderId = getSelectedFolderId();
+      const newFolderId = getSelectedFolderId(activeId);
       const prev        = prevFolderRef.current;
       if (prev !== newFolderId) {
         clearCachedVideos();
         setSelectedFolderId(newFolderId);
         prevFolderRef.current = newFolderId;
 
-        const known    = getKnownFolders();
+        const known    = getKnownFolders(activeId);
         const isActive = view === 'main' || view === 'main_scan';
         if (isActive && activeId) {
           const hasFolder = known.length > 0 && newFolderId !== null;
@@ -691,8 +696,7 @@ export default function Home() {
     if (scanTimeoutRef.current) { clearTimeout(scanTimeoutRef.current); scanTimeoutRef.current = null; }
     setScanning(false); setScanDone(false);
     pendingRef.current = [];
-    clearCachedVideos();
-    clearAllAccountCaches();   // 清除 tg_fg_* / tg_sel_* / tg_known_folders
+    clearCachedVideos();   // sessionStorage video 快取清除；各帳號設定獨立保留
     setAllVideos([]);
 
     // 2. 切換帳號（server 寫 cookie）
@@ -716,8 +720,11 @@ export default function Home() {
       // 若 check 本身失敗（網路問題），仍嘗試掃描讓 SSE 自然報錯
     }
 
-    // 5. Session 有效 → 正常開始掃描
-    doScan(id);
+    // 5. Session 有效 → 讀取此帳號自己的設定，再開始掃描
+    const newFolderId = getSelectedFolderId(id);
+    setSelectedFolderId(newFolderId);
+    prevFolderRef.current = newFolderId;
+    doScan(id, newFolderId !== null ? newFolderId : undefined);
   }
   async function handleLogout(id) {
     if (esRef.current) { esRef.current.close(); esRef.current = null; }
@@ -725,7 +732,7 @@ export default function Home() {
     setScanning(false);
     pendingRef.current = [];
     clearCachedVideos();
-    clearAllAccountCaches();
+    clearAllAccountCaches(id);  // 登出時才清除該帳號的快取
     setAllVideos([]);
     await api('/api/accounts?action=logout', { method: 'POST', body: { id } });
     const data = await api('/api/accounts');
@@ -745,7 +752,7 @@ export default function Home() {
   // ── 播放影片 ──────────────────────────────────────────────────────────────
   function handlePlay(video) {
     addWatched(video);
-    saveCachedVideos(allVideos, String(selectedFolderId));
+    saveCachedVideos(allVideos, `${activeId}_${selectedFolderId}`);
     savePlaylist(displayVideos);
     const p = new URLSearchParams({
       chatId: video.chatId, msgId: video.msgId,

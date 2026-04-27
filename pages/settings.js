@@ -1,8 +1,7 @@
 /**
- * /settings — 設定頁 v2.1
- * ・取得所有群組與頻道
- * ・關鍵字搜尋即時過濾
- * ・全選 / 個別勾選，點選後自動儲存（不需手動按儲存）
+ * /settings — 設定頁 v2.2
+ * ・每個帳號各自獨立儲存群組設定（per-account storage）
+ * ・切換帳號後回到設定頁自動讀取對應帳號的設定
  */
 import { useState, useEffect, useMemo, useRef } from 'react';
 import Head from 'next/head';
@@ -62,40 +61,55 @@ function CheckBox({ checked, indeterminate }) {
 }
 
 export default function SettingsPage() {
-  const [allGroups, setAllGroups] = useState([]);
-  const [selected,  setSelected]  = useState(null); // null=全選, Set=指定 chatId
-  const [search,    setSearch]    = useState('');
-  const [loading,   setLoading]   = useState(false);
-  const [error,     setError]     = useState('');
-  const [savedMsg,  setSavedMsg]  = useState('');
+  const [accountId,  setAccountId]  = useState(null);   // 目前登入帳號 ID
+  const [accountName, setAccountName] = useState('');   // 顯示帳號名稱
+  const [allGroups,  setAllGroups]  = useState([]);
+  const [selected,   setSelected]   = useState(null);   // null=全選, Set=指定 chatId
+  const [search,     setSearch]     = useState('');
+  const [loading,    setLoading]    = useState(false);
+  const [error,      setError]      = useState('');
+  const [savedMsg,   setSavedMsg]   = useState('');
   const savedTimer = useRef(null);
 
-  // ── Mount：讀快取 ─────────────────────────────────────────────────────────
+  // ── Mount：先取得目前帳號，再讀取該帳號的快取 ──────────────────────────────
   useEffect(() => {
-    const cached = getFolderGroups(0);
-    if (cached?.length) {
-      setAllGroups(cached);
-      const sel = getSelectedGroupsInFolder(0);
-      setSelected(sel === null ? null : new Set((sel || []).map(g => g.chatId)));
-    }
+    (async () => {
+      try {
+        const data = await fetch('/api/accounts', { credentials: 'same-origin' }).then(r => r.json());
+        const aid  = data.activeAccountId;
+        const acct = data.accounts?.find(a => a.id === aid);
+        if (!aid) return;
+        setAccountId(aid);
+        setAccountName(acct?.name || acct?.phone || '');
+
+        // 讀取此帳號已快取的群組清單與選擇狀態
+        const cached = getFolderGroups(0, aid);
+        if (cached?.length) {
+          setAllGroups(cached);
+          const sel = getSelectedGroupsInFolder(0, aid);
+          setSelected(sel === null ? null : new Set((sel || []).map(g => g.chatId)));
+        }
+      } catch {}
+    })();
   }, []);
 
   // ── 自動儲存（每次 toggle 後呼叫）────────────────────────────────────────
   function persistSelection(newSelected, groups) {
+    if (!accountId) return;
     const gs = groups || allGroups;
 
-    // 確保 folderId=0 和 known folders 都已設定
-    saveSelectedFolderId(0);
-    const known = getKnownFolders();
+    // 確保 folderId=0 和 known folders 都已設定（per account）
+    saveSelectedFolderId(0, accountId);
+    const known = getKnownFolders(accountId);
     if (!known.find(f => f.id === 0)) {
-      saveKnownFolders([{ id: 0, title: '所有聊天' }, ...known]);
+      saveKnownFolders([{ id: 0, title: '所有聊天' }, ...known], accountId);
     }
 
     if (newSelected === null) {
-      saveSelectedGroupsInFolder(0, null);
+      saveSelectedGroupsInFolder(0, null, accountId);
     } else {
       const arr = gs.filter(g => newSelected.has(g.chatId));
-      saveSelectedGroupsInFolder(0, arr);
+      saveSelectedGroupsInFolder(0, arr, accountId);
     }
 
     // 短暫顯示「已儲存」提示
@@ -106,6 +120,7 @@ export default function SettingsPage() {
 
   // ── 取得群組清單 ──────────────────────────────────────────────────────────
   async function fetchGroups() {
+    if (!accountId) return;
     setLoading(true); setError('');
     try {
       const res  = await fetch('/api/groups', { credentials: 'same-origin' });
@@ -113,11 +128,11 @@ export default function SettingsPage() {
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       const gs = data.groups || [];
       setAllGroups(gs);
-      saveFolderGroups(0, gs);
+      saveFolderGroups(0, gs, accountId);
 
       // 清理已不存在的 chatId
       const ids = new Set(gs.map(g => g.chatId));
-      const prevSel = getSelectedGroupsInFolder(0);
+      const prevSel = getSelectedGroupsInFolder(0, accountId);
       let newSel = null;
       if (prevSel !== null) {
         const cleaned = (prevSel || []).filter(g => ids.has(g.chatId));
@@ -142,7 +157,6 @@ export default function SettingsPage() {
   function toggleGroup(chatId) {
     let newSel;
     if (selected === null) {
-      // 全選 → 取消此一
       newSel = new Set(allGroups.map(g => g.chatId));
       newSel.delete(chatId);
     } else {
@@ -151,7 +165,7 @@ export default function SettingsPage() {
         newSel.delete(chatId);
       } else {
         newSel.add(chatId);
-        if (newSel.size >= allGroups.length) newSel = null; // 全部選了 → null
+        if (newSel.size >= allGroups.length) newSel = null;
       }
     }
     setSelected(newSel);
@@ -203,7 +217,15 @@ export default function SettingsPage() {
         borderBottom: '1px solid #1f1f23', display: 'flex', alignItems: 'center',
         padding: '0 16px', height: 56, gap: 12 }}>
         <Link href="/" style={{ color: '#a1a1aa', fontSize: 22, textDecoration: 'none', lineHeight: 1 }}>←</Link>
-        <h1 style={{ fontSize: 17, fontWeight: 700, flex: 1 }}>設定</h1>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <h1 style={{ fontSize: 17, fontWeight: 700 }}>設定</h1>
+          {accountName && (
+            <p style={{ fontSize: 11, color: '#52525b', marginTop: 1,
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              帳號：{accountName}
+            </p>
+          )}
+        </div>
         {savedMsg && (
           <span style={{ fontSize: 12, color: '#4ade80', flexShrink: 0, transition: 'opacity 0.3s' }}>
             {savedMsg}
@@ -218,13 +240,13 @@ export default function SettingsPage() {
           <div style={{ marginBottom: 12 }}>
             <h2 style={{ fontSize: 15, fontWeight: 700 }}>👥 選擇群組與頻道</h2>
             <p style={{ fontSize: 12, color: '#71717a', marginTop: 4, lineHeight: 1.6 }}>
-              取得帳號中的所有群組，勾選後自動儲存為影片來源。
+              取得帳號中的所有群組，勾選後自動儲存為影片來源。每個帳號各自獨立儲存設定。
             </p>
           </div>
 
           <button
             onClick={fetchGroups}
-            disabled={loading}
+            disabled={loading || !accountId}
             style={{ width: '100%', display: 'flex', alignItems: 'center',
               justifyContent: 'center', gap: 8,
               padding: '11px 16px', borderRadius: 10, fontSize: 13, fontWeight: 600,
