@@ -67,8 +67,9 @@ export default function VideoPage() {
   const [zoom,          setZoom]         = useState({ scale: 1, x: 0, y: 0 }); // 觸發 re-render 用
 
   // ── Refs ───────────────────────────────────────────────────────────────────
-  const videoRef        = useRef(null);
-  const navigating      = useRef(false);
+  const videoRef          = useRef(null);
+  const navigating        = useRef(false);
+  const voluntaryFsExit   = useRef(false); // 我們自己呼叫 exitFullscreen 時設為 true，避免誤觸 router.back()
   const toastTimer      = useRef(null);
   const touchStartY     = useRef(null);
   const touchStartX     = useRef(null);
@@ -99,7 +100,7 @@ export default function VideoPage() {
       `&docFileRef=${encodeURIComponent(docFileRef||'')}`
     : '';
 
-  // ── 自動全螢幕（mount + first touch）──────────────────────────────────────
+  // ── 自動全螢幕（mount + first touch）+ 按退回鍵直接回首頁 ────────────────
   useEffect(() => {
     const tryFs = () => {
       const el = document.documentElement;
@@ -109,12 +110,32 @@ export default function VideoPage() {
         el.webkitRequestFullscreen();
       }
     };
-    tryFs(); // 立即嘗試（SPA 跳頁後部分瀏覽器仍視為 gesture context）
+    tryFs();
     window.addEventListener('touchstart', tryFs, { once: true, passive: true });
 
+    // 當全螢幕被系統/瀏覽器退出（例如使用者按退回鍵）時，直接 router.back()
+    // 這樣就跳過「先退出全螢幕，再按一次退回」的雙步驟
+    const onFsChange = () => {
+      const inFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+      if (!inFs) {
+        if (voluntaryFsExit.current) {
+          // 我們自己呼叫 exitFullscreen（離頁 / 換影片），不做任何事
+          voluntaryFsExit.current = false;
+        } else if (!navigating.current) {
+          // 使用者按退回鍵退出全螢幕 → 直接回前一頁
+          router.back();
+        }
+      }
+    };
+    document.addEventListener('fullscreenchange',       onFsChange);
+    document.addEventListener('webkitfullscreenchange', onFsChange);
+
     return () => {
+      // 標記為主動退出，避免 cleanup 的 exitFullscreen 觸發 router.back()
+      voluntaryFsExit.current = true;
       window.removeEventListener('touchstart', tryFs);
-      // 離開影片頁時退出全螢幕
+      document.removeEventListener('fullscreenchange',       onFsChange);
+      document.removeEventListener('webkitfullscreenchange', onFsChange);
       try {
         if (document.fullscreenElement && document.exitFullscreen)
           document.exitFullscreen().catch(() => {});
@@ -122,7 +143,7 @@ export default function VideoPage() {
           document.webkitExitFullscreen();
       } catch {}
     };
-  }, []);
+  }, [router]); // eslint-disable-line
 
   // ── 立即播放：不等 buffer，多點觸發確保在所有環境啟動 ──────────────────────
   useEffect(() => {
