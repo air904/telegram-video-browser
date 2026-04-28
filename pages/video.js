@@ -64,6 +64,7 @@ export default function VideoPage() {
   const [showScrubber,  setShowScrubber] = useState(false);
   const [currentTime,   setCurrentTime]  = useState(0);
   const [videoDuration, setVideoDuration]= useState(0);
+  const [zoom,          setZoom]         = useState({ scale: 1, x: 0, y: 0 }); // 觸發 re-render 用
 
   // ── Refs ───────────────────────────────────────────────────────────────────
   const videoRef        = useRef(null);
@@ -79,6 +80,12 @@ export default function VideoPage() {
   const lpFired         = useRef(false);
   const scrubberTimer   = useRef(null);
   const scrubberVisible = useRef(false);  // 給 handleTouchEnd 讀的同步版本
+  // ── Pinch-to-zoom refs ─────────────────────────────────────────────────────
+  const zoomRef         = useRef({ scale: 1, x: 0, y: 0 }); // real-time（不觸發 re-render）
+  const pinchStartDist  = useRef(null);
+  const pinchStartScale = useRef(1);
+  const isPinching      = useRef(false);
+  const panStart        = useRef(null);   // 放大後單指平移的起始位置
 
   // ── Stream URL ─────────────────────────────────────────────────────────────
   const videoId   = chatId && msgId ? `${chatId}_${msgId}` : null;
@@ -243,14 +250,37 @@ export default function VideoPage() {
     if (vid.webkitShowPlaybackTargetPicker) vid.webkitShowPlaybackTargetPicker();
   }, []);
 
+  // ── Zoom 重置 helper ───────────────────────────────────────────────────────
+  const resetZoom = useCallback(() => {
+    zoomRef.current = { scale: 1, x: 0, y: 0 };
+    setZoom({ scale: 1, x: 0, y: 0 });
+  }, []);
+
   // ── 觸控手勢 ───────────────────────────────────────────────────────────────
   const handleTouchStart = useCallback((e) => {
+    // ── 雙指 pinch 開始 ──────────────────────────────────────────────────────
+    if (e.touches.length === 2) {
+      isPinching.current = true;
+      clearAllLpTimers();
+      touchStartY.current = null; // 取消單指狀態
+      const dx = e.touches[1].clientX - e.touches[0].clientX;
+      const dy = e.touches[1].clientY - e.touches[0].clientY;
+      pinchStartDist.current  = Math.hypot(dx, dy);
+      pinchStartScale.current = zoomRef.current.scale;
+      return;
+    }
+
     const touch = e.touches[0];
     touchStartY.current    = touch.clientY;
     touchStartX.current    = touch.clientX;
     touchStartTime.current = Date.now();
     lpFired.current        = false;
     clearAllLpTimers();
+
+    // 放大後記錄平移起點（單指拖曳用）
+    if (zoomRef.current.scale > 1) {
+      panStart.current = { x: touch.clientX, y: touch.clientY };
+    }
 
     const isTopZone = touch.clientY < window.innerHeight / 3;
 
@@ -303,6 +333,38 @@ export default function VideoPage() {
       docId, docAccessHash, docFileRef, showToast, clearAllLpTimers]);    // eslint-disable-line
 
   const handleTouchMove = useCallback((e) => {
+    // ── 雙指 pinch 縮放 ───────────────────────────────────────────────────────
+    if (e.touches.length === 2) {
+      isPinching.current = true;
+      if (pinchStartDist.current === null) return;
+      const dx   = e.touches[1].clientX - e.touches[0].clientX;
+      const dy   = e.touches[1].clientY - e.touches[0].clientY;
+      const dist = Math.hypot(dx, dy);
+      const newScale = Math.max(1, Math.min(5, pinchStartScale.current * (dist / pinchStartDist.current)));
+      const newZoom  = { ...zoomRef.current, scale: newScale };
+      // 縮回 1x 時把平移也清零
+      if (newScale <= 1) { newZoom.x = 0; newZoom.y = 0; }
+      zoomRef.current = newZoom;
+      setZoom({ ...newZoom });
+      return;
+    }
+
+    // ── 放大後單指平移 ────────────────────────────────────────────────────────
+    if (zoomRef.current.scale > 1 && panStart.current) {
+      const touch = e.touches[0];
+      const dx = touch.clientX - panStart.current.x;
+      const dy = touch.clientY - panStart.current.y;
+      panStart.current = { x: touch.clientX, y: touch.clientY };
+      const maxX = (zoomRef.current.scale - 1) * window.innerWidth  / 2;
+      const maxY = (zoomRef.current.scale - 1) * window.innerHeight / 2;
+      const newX = Math.max(-maxX, Math.min(maxX, zoomRef.current.x + dx));
+      const newY = Math.max(-maxY, Math.min(maxY, zoomRef.current.y + dy));
+      zoomRef.current = { ...zoomRef.current, x: newX, y: newY };
+      setZoom({ ...zoomRef.current });
+      return; // 平移期間不觸發長按取消
+    }
+
+    // ── 原始單指手勢 ──────────────────────────────────────────────────────────
     if (touchStartY.current === null) return;
     const absY = Math.abs(e.touches[0].clientY - touchStartY.current);
     const absX = Math.abs(e.touches[0].clientX - touchStartX.current);
@@ -311,6 +373,23 @@ export default function VideoPage() {
 
   const handleTouchEnd = useCallback((e) => {
     clearAllLpTimers();
+
+    // ── 雙指 pinch 結束 ────────────────────────────────────────────────────────
+    if (isPinching.current) {
+      isPinching.current = false;
+      panStart.current   = null;
+      touchStartY.current = null;
+      // 縮到接近 1x 時直接 reset
+      if (zoomRef.current.scale < 1.05) resetZoom();
+      return;
+    }
+
+    // ── 放大後單指平移結束（跳過滑動切換）────────────────────────────────────
+    if (zoomRef.current.scale > 1) {
+      panStart.current    = null;
+      touchStartY.current = null;
+      return;
+    }
 
     // 2x 模式放開 → 恢復 1x
     if (is2xMode.current) {
@@ -348,7 +427,7 @@ export default function VideoPage() {
         showScrubberFor3s();
       }
     }
-  }, [goNext, goPrev, clearAllLpTimers, showScrubberFor3s]);
+  }, [goNext, goPrev, clearAllLpTimers, showScrubberFor3s, resetZoom]);
 
   // ── Derived ────────────────────────────────────────────────────────────────
   const isReady  = !!chatId;
@@ -396,6 +475,7 @@ export default function VideoPage() {
         position: 'fixed', top: 0, left: 0,
         width: '100%', height: '100%',
         background: '#000', zIndex: 9999,
+        overflow: 'hidden',
         userSelect: 'none', WebkitUserSelect: 'none',
       }}>
 
@@ -419,6 +499,9 @@ export default function VideoPage() {
               position: 'absolute', top: 0, left: 0,
               width: '100%', height: '100%',
               objectFit: 'contain',
+              transformOrigin: 'center center',
+              transform: `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`,
+              transition: isPinching.current ? 'none' : 'transform 0.1s ease',
               WebkitTouchCallout: 'none',
             }}
           />
@@ -433,7 +516,7 @@ export default function VideoPage() {
           onTouchStart={handleTouchStart}
           onTouchMove={handleTouchMove}
           onTouchEnd={handleTouchEnd}
-          style={{ position:'absolute', inset:0, zIndex:10 }}
+          style={{ position:'absolute', inset:0, zIndex:10, touchAction:'none' }}
         />
 
         {/* ── 暫停圖示 ── */}
