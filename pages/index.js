@@ -9,7 +9,7 @@ import {
   getFolderGroups, saveFolderGroups,
   getSelectedGroupsInFolder,
   saveCachedVideos, getCachedVideos, clearCachedVideos,
-  clearAllAccountCaches,
+  clearAllAccountCaches, migrateOldStorage,
 } from '../lib/storage';
 
 // ─── 硬編碼 API 憑證 ──────────────────────────────────────────────────────────
@@ -613,6 +613,9 @@ export default function Home() {
         const aid = data.activeAccountId;
         setActiveId(aid);
 
+        // 舊格式 storage 自動 migrate 到新的 per-account key
+        migrateOldStorage(aid);
+
         // 讀取此帳號自己的設定（文件夾選擇、已知文件夾）
         const folderId = getSelectedFolderId(aid);
         const known    = getKnownFolders(aid);
@@ -648,8 +651,8 @@ export default function Home() {
       const folderId = getSelectedFolderId(activeId);
       if (known.length > 0 && folderId !== null) {
         doScan(activeId, folderId);
-        setView('main');
       }
+      setView('main'); // 無論是否掃描，都離開 main_scan 狀態
     }
   }, [view, activeId]); // eslint-disable-line
 
@@ -721,10 +724,12 @@ export default function Home() {
     }
 
     // 5. Session 有效 → 讀取此帳號自己的設定，再開始掃描
+    migrateOldStorage(id);  // 確保此帳號的舊資料已 migrate
     const newFolderId = getSelectedFolderId(id);
     setSelectedFolderId(newFolderId);
     prevFolderRef.current = newFolderId;
-    doScan(id, newFolderId !== null ? newFolderId : undefined);
+    // 注意：傳 null（而非 undefined），doScan 才能正確判斷「未設定」不啟動掃描
+    doScan(id, newFolderId);
   }
   async function handleLogout(id) {
     if (esRef.current) { esRef.current.close(); esRef.current = null; }
