@@ -440,11 +440,15 @@ export default function Home() {
   // ── 重新登入（切換帳號後 session 失效時使用）───────────────────────────────
   const [reloginPhone, setReloginPhone]   = useState('');
 
+  // ── Infinite scroll：首次顯示 200 支，滑到底自動追加 ─────────────────────
+  const [displayLimit, setDisplayLimit]   = useState(200);
+
   const esRef           = useRef(null);
   const toastTimer      = useRef(null);
   const prevFolderRef   = useRef(undefined); // 追蹤上次文件夾選擇
   const pendingRef      = useRef([]);         // 掃描期間累積，done 時 atomic replace
   const scanTimeoutRef  = useRef(null);       // 掃描逾時保護
+  const sentinelRef     = useRef(null);       // infinite scroll 觸發點
 
   // ── displayVideos：allVideos 套上所有 client-side filter ──────────────────
   const displayVideos = useMemo(() => {
@@ -780,6 +784,21 @@ export default function Home() {
     showToast(added ? '❤️ 已加入最愛' : '🤍 已從最愛移除');
   }
 
+  // ── Infinite scroll：allVideos / filters 改變時重置顯示數量 ─────────────
+  useEffect(() => { setDisplayLimit(200); }, [allVideos, search, minDuration, maxDuration, days, videosPerGroup]);
+
+  // ── Infinite scroll：sentinel 進入 viewport 時追加 200 支 ─────────────────
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      ([entry]) => { if (entry.isIntersecting) setDisplayLimit(n => n + 200); },
+      { rootMargin: '400px' }   // 提前 400px 觸發，讓新卡片預載更流暢
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, []); // 只掛一次；setDisplayLimit functional 更新不需要 dep
+
   // ── 初始化 favIds ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -872,7 +891,7 @@ export default function Home() {
           <span style={{color:'#71717a',fontSize:12,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
             {scanning ? scanStatus
               : allVideos.length > 0
-                ? `共 ${allVideos.length} 支（顯示 ${displayVideos.length} 支）`
+                ? `共 ${allVideos.length} 支（符合 ${displayVideos.length} 支，顯示 ${Math.min(displayLimit, displayVideos.length)} 支）`
                 : '尚無影片'}
           </span>
           {!scanning && selectedFolderId !== null && (
@@ -971,13 +990,26 @@ export default function Home() {
 
         {/* ⑤ 影片格狀清單 */}
         <div className="video-grid">
-          {displayVideos.map((v,i) => (
+          {displayVideos.slice(0, displayLimit).map((v,i) => (
             <div key={v.id} className="vcard" style={{animationDelay:`${Math.min(i*0.025,0.4)}s`}}>
               <VideoCard video={v} onPlay={handlePlay} onLongPress={handleLongPress}
                 isWatched={false} isFav={favIds.has(v.id)} thumbReady={scanDone}/>
             </div>
           ))}
         </div>
+
+        {/* ⑥ Infinite scroll sentinel */}
+        {displayVideos.length > displayLimit ? (
+          <div ref={sentinelRef} style={{textAlign:'center',padding:'32px 0 16px',color:'#52525b',fontSize:12}}>
+            <Spinner size={16}/>&nbsp; 載入更多…&nbsp;（{displayLimit} / {displayVideos.length} 支）
+          </div>
+        ) : (
+          displayVideos.length > 0 && (
+            <div style={{textAlign:'center',padding:'20px 0 12px',color:'#3f3f46',fontSize:11}}>
+              已顯示全部 {displayVideos.length} 支
+            </div>
+          )
+        )}
       </main>
 
       <Toast message={toast}/>
