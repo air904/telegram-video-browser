@@ -1,22 +1,26 @@
 /**
- * /video — 影片全螢幕播放頁面 v3
+ * /video — 影片全螢幕播放頁面 v4
  *
- * 手勢規則（全螢幕）：
- *   上滑 (≥ 60px) → 下一支
- *   下滑 (≥ 60px) → 上一支
- *   長按上 1/3 螢幕 500ms  → 加入 / 取消最愛
- *   長按上 1/3 螢幕 3000ms → 下載影片
- *   長按下 2/3 螢幕 500ms  → 2x 倍速（放開恢復）
- *   單擊                   → 播放 / 暫停切換
+ * 全螢幕：mount 後立即呼叫 requestFullscreen（Android/Chrome）；
+ *         first-touch 時再試一次（保證在 user-gesture context 內）。
+ *         iOS Safari 不支援 Fullscreen API，退回 CSS 全覆蓋。
+ *
+ * 手勢規則：
+ *   上滑 (≥ 60px)               → 下一支
+ *   下滑 (≥ 60px)               → 上一支
+ *   長按上 1/3 螢幕 500ms       → 加入 / 取消最愛
+ *   長按上 1/3 螢幕 3000ms      → 下載影片
+ *   長按下 2/3 螢幕 500ms       → 2x 倍速（放開恢復 1x）
+ *   輕按 (< 250ms, 移動 < 15px) → 顯示 / 隱藏進度列（3 秒自動收起）
  */
-import { useRouter } from 'next/router';
+import { useRouter }                       from 'next/router';
 import { useEffect, useState, useRef, useCallback } from 'react';
-import Head from 'next/head';
+import Head                                from 'next/head';
 import { addWatched, isFavorite, toggleFavorite, getPlaylist } from '../lib/storage';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function fmtDuration(secs) {
-  if (!secs) return '';
+  if (!secs || isNaN(secs)) return '0:00';
   const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = Math.floor(secs % 60);
   return h > 0
     ? `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`
@@ -28,11 +32,10 @@ function fmtBytes(b) {
   if (b < 1024**3)   return `${(b/1024/1024).toFixed(1)} MB`;
   return `${(b/1024**3).toFixed(2)} GB`;
 }
-
 function CastSpinner() {
   return (
     <svg width={13} height={13} viewBox="0 0 24 24"
-      style={{ animation: 'spin 0.8s linear infinite', flexShrink: 0 }}>
+      style={{ animation:'spin 0.8s linear infinite', flexShrink:0 }}>
       <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor"
         strokeWidth="3" strokeDasharray="31.4" strokeDashoffset="10" strokeLinecap="round"/>
     </svg>
@@ -49,30 +52,36 @@ export default function VideoPage() {
     docId, docAccessHash, docFileRef,
   } = query;
 
-  // ── State ────────────────────────────────────────────────────────────────────
-  const [fav,          setFav]          = useState(false);
-  const [toast,        setToast]        = useState('');
-  const [playlist,     setPlaylist]     = useState([]);
-  const [currentIndex, setCurrentIndex] = useState(-1);
-  const [speedHint,    setSpeedHint]    = useState(false);  // 2x overlay
-  const [paused,       setPaused]       = useState(false);  // 暫停圖示
-  const [castState,    setCastState]    = useState('unavailable');
+  // ── State ──────────────────────────────────────────────────────────────────
+  const [fav,           setFav]          = useState(false);
+  const [toast,         setToast]        = useState('');
+  const [playlist,      setPlaylist]     = useState([]);
+  const [currentIndex,  setCurrentIndex] = useState(-1);
+  const [speedHint,     setSpeedHint]    = useState(false);
+  const [paused,        setPaused]       = useState(false);
+  const [castState,     setCastState]    = useState('unavailable');
+  // 進度列
+  const [showScrubber,  setShowScrubber] = useState(false);
+  const [currentTime,   setCurrentTime]  = useState(0);
+  const [videoDuration, setVideoDuration]= useState(0);
 
-  // ── Refs ─────────────────────────────────────────────────────────────────────
-  const videoRef         = useRef(null);
-  const navigating       = useRef(false);
-  const toastTimer       = useRef(null);
-  const touchStartY      = useRef(null);
-  const touchStartX      = useRef(null);
-  const touchStartTime   = useRef(null);
-  const lpTopTimer       = useRef(null);   // 上 1/3：500ms → 最愛
-  const lpTopDlTimer     = useRef(null);   // 上 1/3：3000ms → 下載
-  const lpBotTimer       = useRef(null);   // 下 2/3：500ms → 2x
-  const is2xMode         = useRef(false);
-  const lpFired          = useRef(false);  // 已觸發長按，抑制單擊
+  // ── Refs ───────────────────────────────────────────────────────────────────
+  const videoRef        = useRef(null);
+  const navigating      = useRef(false);
+  const toastTimer      = useRef(null);
+  const touchStartY     = useRef(null);
+  const touchStartX     = useRef(null);
+  const touchStartTime  = useRef(null);
+  const lpTopTimer      = useRef(null);
+  const lpTopDlTimer    = useRef(null);
+  const lpBotTimer      = useRef(null);
+  const is2xMode        = useRef(false);
+  const lpFired         = useRef(false);
+  const scrubberTimer   = useRef(null);
+  const scrubberVisible = useRef(false);  // 給 handleTouchEnd 讀的同步版本
 
-  // ── Stream URL（在所有 hooks 前）────────────────────────────────────────────
-  const videoId  = chatId && msgId ? `${chatId}_${msgId}` : null;
+  // ── Stream URL ─────────────────────────────────────────────────────────────
+  const videoId   = chatId && msgId ? `${chatId}_${msgId}` : null;
   const streamUrl = chatId
     ? `/api/stream?chatId=${chatId}&msgId=${msgId}` +
       `&accessHash=${encodeURIComponent(accessHash||'')}` +
@@ -83,37 +92,69 @@ export default function VideoPage() {
       `&docFileRef=${encodeURIComponent(docFileRef||'')}`
     : '';
 
-  // ── Load playlist ─────────────────────────────────────────────────────────
-  useEffect(() => { setPlaylist(getPlaylist()); }, []);
+  // ── 自動全螢幕（mount + first touch）──────────────────────────────────────
+  useEffect(() => {
+    const tryFs = () => {
+      const el = document.documentElement;
+      if (el.requestFullscreen) {
+        el.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
+      } else if (el.webkitRequestFullscreen) {
+        el.webkitRequestFullscreen();
+      }
+    };
+    tryFs(); // 立即嘗試（SPA 跳頁後部分瀏覽器仍視為 gesture context）
+    window.addEventListener('touchstart', tryFs, { once: true, passive: true });
 
-  // ── currentIndex ─────────────────────────────────────────────────────────
+    return () => {
+      window.removeEventListener('touchstart', tryFs);
+      // 離開影片頁時退出全螢幕
+      try {
+        if (document.fullscreenElement && document.exitFullscreen)
+          document.exitFullscreen().catch(() => {});
+        else if (document.webkitFullscreenElement && document.webkitExitFullscreen)
+          document.webkitExitFullscreen();
+      } catch {}
+    };
+  }, []);
+
+  // ── autoPlay 備援：canplay 時強制 play()（避免 iOS 攔截）──────────────────
+  useEffect(() => {
+    const vid = videoRef.current;
+    if (!vid || !streamUrl) return;
+    const tryPlay = () => vid.play().catch(() => {});
+    vid.addEventListener('canplay', tryPlay, { once: true });
+    return () => vid.removeEventListener('canplay', tryPlay);
+  }, [streamUrl]);
+
+  // ── playlist ───────────────────────────────────────────────────────────────
+  useEffect(() => { setPlaylist(getPlaylist()); }, []);
   useEffect(() => {
     if (!videoId || !playlist.length) return;
     setCurrentIndex(playlist.findIndex(v => v.id === videoId));
   }, [videoId, playlist]);
 
-  // ── Mark watched + fav ───────────────────────────────────────────────────
+  // ── Watched + fav ─────────────────────────────────────────────────────────
   useEffect(() => {
     if (!chatId || !msgId || !accountId) return;
     addWatched({
       id: videoId, chatId, msgId, accessHash, chatType,
-      mimeType: mimeType || 'video/mp4', accountId,
-      title: title || '', chatTitle: chatTitle || '',
+      mimeType: mimeType||'video/mp4', accountId,
+      title: title||'', chatTitle: chatTitle||'',
       date: parseInt(date)||0, duration: parseInt(duration)||0,
-      fileSize: parseInt(fileSize)||0, hasThumbnail: hasThumbnail === 'true',
+      fileSize: parseInt(fileSize)||0, hasThumbnail: hasThumbnail==='true',
     });
     setFav(isFavorite(videoId));
     navigating.current = false;
   }, [chatId, msgId, accountId]); // eslint-disable-line
 
-  // ── Cast 偵測 ─────────────────────────────────────────────────────────────
+  // ── Cast ───────────────────────────────────────────────────────────────────
   useEffect(() => {
     const vid = videoRef.current;
     if (!vid) return;
     if (vid.remote) {
       vid.remote.watchAvailability(ok => {
         if (ok) setCastState(s => s === 'connected' ? s : 'available');
-      }).catch(()=>{});
+      }).catch(() => {});
       vid.remote.onconnecting = () => setCastState('connecting');
       vid.remote.onconnect    = () => setCastState('connected');
       vid.remote.ondisconnect = () => setCastState('available');
@@ -127,7 +168,28 @@ export default function VideoPage() {
     }
   }, [streamUrl]); // eslint-disable-line
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
+  // ── 進度列 helpers ─────────────────────────────────────────────────────────
+  const showScrubberFor3s = useCallback(() => {
+    scrubberVisible.current = true;
+    setShowScrubber(true);
+    clearTimeout(scrubberTimer.current);
+    scrubberTimer.current = setTimeout(() => {
+      scrubberVisible.current = false;
+      setShowScrubber(false);
+    }, 3000);
+  }, []);
+
+  const handleTimeUpdate = useCallback(() => {
+    const vid = videoRef.current;
+    if (vid) setCurrentTime(vid.currentTime);
+  }, []);
+
+  const handleLoadedMetadata = useCallback(() => {
+    const vid = videoRef.current;
+    if (vid) setVideoDuration(vid.duration || 0);
+  }, []);
+
+  // ── Toast / navigation ─────────────────────────────────────────────────────
   const showToast = useCallback((msg) => {
     setToast(msg);
     clearTimeout(toastTimer.current);
@@ -172,9 +234,7 @@ export default function VideoPage() {
     if (currentIndex >= 0 && currentIndex < playlist.length - 1) {
       showToast('自動播放下一支…');
       setTimeout(() => goNext(), 800);
-    } else {
-      showToast('播放清單已結束');
-    }
+    } else { showToast('播放清單已結束'); }
   }, [currentIndex, playlist, goNext, showToast]);
 
   const handleCast = useCallback(async () => {
@@ -183,7 +243,7 @@ export default function VideoPage() {
     if (vid.webkitShowPlaybackTargetPicker) vid.webkitShowPlaybackTargetPicker();
   }, []);
 
-  // ── 觸控手勢 ─────────────────────────────────────────────────────────────
+  // ── 觸控手勢 ───────────────────────────────────────────────────────────────
   const handleTouchStart = useCallback((e) => {
     const touch = e.touches[0];
     touchStartY.current    = touch.clientY;
@@ -192,11 +252,10 @@ export default function VideoPage() {
     lpFired.current        = false;
     clearAllLpTimers();
 
-    // 上 1/3 vs 下 2/3：以螢幕高度判斷
     const isTopZone = touch.clientY < window.innerHeight / 3;
 
     if (isTopZone) {
-      // ── 上 1/3：500ms → 最愛；3000ms → 下載 ────────────────────────────
+      // 500ms → 最愛
       lpTopTimer.current = setTimeout(() => {
         lpFired.current = true;
         if (!videoId) return;
@@ -211,7 +270,7 @@ export default function VideoPage() {
         setFav(added);
         showToast(added ? '❤️ 已加入最愛（繼續按 3 秒可下載）' : '🤍 已從最愛移除');
       }, 500);
-
+      // 3000ms → 下載
       lpTopDlTimer.current = setTimeout(() => {
         lpFired.current = true;
         if (!chatId || !msgId) return;
@@ -229,9 +288,8 @@ export default function VideoPage() {
         document.body.appendChild(a); a.click(); document.body.removeChild(a);
         showToast('⬇️ 開始下載影片…');
       }, 3000);
-
     } else {
-      // ── 下 2/3：500ms → 2x 倍速 ─────────────────────────────────────────
+      // 500ms → 2x 倍速
       lpBotTimer.current = setTimeout(() => {
         lpFired.current = true;
         const vid = videoRef.current; if (!vid) return;
@@ -248,7 +306,6 @@ export default function VideoPage() {
     if (touchStartY.current === null) return;
     const absY = Math.abs(e.touches[0].clientY - touchStartY.current);
     const absX = Math.abs(e.touches[0].clientX - touchStartX.current);
-    // 移動超過 15px → 取消所有長按計時（不觸發最愛 / 下載 / 2x）
     if (absY > 15 || absX > 15) clearAllLpTimers();
   }, [clearAllLpTimers]);
 
@@ -266,39 +323,42 @@ export default function VideoPage() {
     }
 
     if (touchStartY.current === null) return;
-    const end    = e.changedTouches[0];
-    const deltaY = touchStartY.current  - end.clientY;  // > 0 = 上滑
-    const deltaX = touchStartX.current  - end.clientX;
-    const absY   = Math.abs(deltaY);
-    const absX   = Math.abs(deltaX);
+    const end     = e.changedTouches[0];
+    const deltaY  = touchStartY.current - end.clientY;
+    const deltaX  = touchStartX.current - end.clientX;
+    const absY    = Math.abs(deltaY);
+    const absX    = Math.abs(deltaX);
     const elapsed = Date.now() - (touchStartTime.current || 0);
     touchStartY.current = null;
 
-    // ── 垂直滑動 ≥ 60px 且垂直幅度 > 水平 → 切換影片 ───────────────────
+    // 垂直滑動 ≥ 60px → 切換影片
     if (absY >= 60 && absY > absX * 1.5) {
-      if (deltaY > 0) goNext(); // 上滑 → 下一支
-      else            goPrev(); // 下滑 → 上一支
+      if (deltaY > 0) goNext();
+      else            goPrev();
       return;
     }
 
-    // ── 單擊（< 250ms，移動 < 15px，未觸發長按）→ 播放 / 暫停切換 ────────
+    // 輕按 → 顯示 / 隱藏進度列
     if (!lpFired.current && elapsed < 250 && absX < 15 && absY < 15) {
-      const vid = videoRef.current;
-      if (vid) {
-        if (vid.paused) vid.play();
-        else            vid.pause();
+      if (scrubberVisible.current) {
+        scrubberVisible.current = false;
+        clearTimeout(scrubberTimer.current);
+        setShowScrubber(false);
+      } else {
+        showScrubberFor3s();
       }
     }
-  }, [goNext, goPrev, clearAllLpTimers]);
+  }, [goNext, goPrev, clearAllLpTimers, showScrubberFor3s]);
 
-  // ── Derived ──────────────────────────────────────────────────────────────
+  // ── Derived ────────────────────────────────────────────────────────────────
   const isReady  = !!chatId;
   const hasPrev  = currentIndex > 0;
   const hasNext  = currentIndex >= 0 && currentIndex < playlist.length - 1;
   const posLabel = currentIndex >= 0 && playlist.length > 1
     ? `${currentIndex + 1} / ${playlist.length}` : '';
+  const progress = videoDuration > 0 ? (currentTime / videoDuration) * 100 : 0;
 
-  // ── Render ────────────────────────────────────────────────────────────────
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <>
       <Head>
@@ -307,15 +367,35 @@ export default function VideoPage() {
       </Head>
       <style>{`
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { background: #000; overflow: hidden; }
-        @keyframes spin    { to { transform: rotate(360deg); } }
-        @keyframes popIn   { from { opacity:0; transform:translate(-50%,-50%) scale(0.85); } to { opacity:1; transform:translate(-50%,-50%) scale(1); } }
-        @keyframes fadeIn  { from { opacity:0; } to { opacity:1; } }
+        html, body { background: #000; overflow: hidden; width: 100%; height: 100%; }
+        @keyframes spin  { to { transform: rotate(360deg); } }
+        @keyframes popIn { from { opacity:0; transform:translate(-50%,-50%) scale(0.85); } to { opacity:1; transform:translate(-50%,-50%) scale(1); } }
+        @keyframes fadeUp { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:none; } }
+        /* 進度條樣式 */
+        .scrubber-range {
+          -webkit-appearance: none; appearance: none;
+          width: 100%; height: 4px; border-radius: 2px;
+          background: linear-gradient(to right, #a78bfa ${progress}%, rgba(255,255,255,0.25) ${progress}%);
+          outline: none; cursor: pointer;
+        }
+        .scrubber-range::-webkit-slider-thumb {
+          -webkit-appearance: none; appearance: none;
+          width: 18px; height: 18px; border-radius: 50%;
+          background: #a78bfa; box-shadow: 0 0 6px rgba(167,139,250,0.6);
+          cursor: pointer;
+        }
+        .scrubber-range::-moz-range-thumb {
+          width: 18px; height: 18px; border-radius: 50%;
+          background: #a78bfa; border: none;
+          box-shadow: 0 0 6px rgba(167,139,250,0.6);
+        }
       `}</style>
 
-      {/* ── 全螢幕容器（CSS fixed，不依賴 requestFullscreen）── */}
+      {/* ── 全螢幕容器 ── */}
       <div style={{
-        position: 'fixed', inset: 0, background: '#000', zIndex: 9999,
+        position: 'fixed', top: 0, left: 0,
+        width: '100%', height: '100%',
+        background: '#000', zIndex: 9999,
         userSelect: 'none', WebkitUserSelect: 'none',
       }}>
 
@@ -332,9 +412,11 @@ export default function VideoPage() {
             onEnded={handleEnded}
             onPlay={()  => setPaused(false)}
             onPause={() => setPaused(true)}
+            onTimeUpdate={handleTimeUpdate}
+            onLoadedMetadata={handleLoadedMetadata}
             onContextMenu={e => e.preventDefault()}
             style={{
-              position: 'absolute', inset: 0,
+              position: 'absolute', top: 0, left: 0,
               width: '100%', height: '100%',
               objectFit: 'contain',
               WebkitTouchCallout: 'none',
@@ -346,7 +428,7 @@ export default function VideoPage() {
           </div>
         )}
 
-        {/* ── 手勢捕捉層（透明，z-index 低於頂 / 底列按鈕）── */}
+        {/* ── 手勢捕捉層 ── */}
         <div
           onTouchStart={handleTouchStart}
           onTouchMove={handleTouchMove}
@@ -355,11 +437,11 @@ export default function VideoPage() {
         />
 
         {/* ── 暫停圖示 ── */}
-        {paused && (
+        {paused && !showScrubber && (
           <div style={{
             position:'absolute', top:'50%', left:'50%',
             transform:'translate(-50%,-50%)',
-            pointerEvents:'none', zIndex:15, animation:'fadeIn 0.15s ease',
+            pointerEvents:'none', zIndex:15,
           }}>
             <div style={{ background:'rgba(0,0,0,0.55)', borderRadius:'50%', width:68, height:68, display:'flex', alignItems:'center', justifyContent:'center' }}>
               <span style={{ fontSize:30, color:'#fff', marginLeft:5 }}>▶</span>
@@ -382,17 +464,17 @@ export default function VideoPage() {
           </div>
         )}
 
-        {/* ── 頂部列（← 返回 / 標題 / 播放順序 / 投影）── */}
+        {/* ── 頂部列 ── */}
         <div style={{
           position:'absolute', top:0, left:0, right:0, zIndex:20,
-          background:'linear-gradient(to bottom, rgba(0,0,0,0.72) 0%, transparent 100%)',
-          padding:'env(safe-area-inset-top, 12px) 16px 32px',
+          background:'linear-gradient(to bottom, rgba(0,0,0,0.75) 0%, transparent 100%)',
           paddingTop: 'max(env(safe-area-inset-top, 0px), 12px)',
+          padding:'12px 16px 36px',
           display:'flex', alignItems:'center', gap:10,
         }}>
           <button
             onClick={() => router.back()}
-            style={{ background:'none', border:'none', color:'#fff', fontSize:26, cursor:'pointer', padding:'2px 8px', lineHeight:1, flexShrink:0 }}
+            style={{ background:'none', border:'none', color:'#fff', fontSize:26, cursor:'pointer', padding:'2px 8px', lineHeight:1, flexShrink:0, zIndex:25, position:'relative' }}
           >←</button>
           <div style={{ flex:1, minWidth:0 }}>
             <p style={{ fontWeight:600, fontSize:14, color:'#fff', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
@@ -413,84 +495,153 @@ export default function VideoPage() {
               color: castState === 'connected' ? '#a78bfa' : 'rgba(255,255,255,0.7)',
               fontSize:13, fontWeight:600, fontFamily:'inherit',
               display:'flex', alignItems:'center', gap:4, padding:'4px 6px',
+              position:'relative', zIndex:25,
             }}>
               {castState === 'connecting' ? <><CastSpinner/>…</> : <>📺</>}
             </button>
           )}
         </div>
 
-        {/* ── 底部列（頻道 / 標題 / 時長 ／ ❤️ / 下一支）── */}
-        <div style={{
-          position:'absolute', bottom:0, left:0, right:0, zIndex:20,
-          background:'linear-gradient(to top, rgba(0,0,0,0.78) 0%, transparent 100%)',
-          paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 20px)',
-          padding:'32px 16px',
-          paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 20px)',
-          display:'flex', alignItems:'flex-end', gap:14,
-        }}>
-          <div style={{ flex:1, minWidth:0 }}>
-            {chatTitle && (
-              <p style={{ fontSize:12, color:'#a78bfa', marginBottom:5, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
-                📡 {chatTitle}
-              </p>
-            )}
-            <p style={{ fontSize:15, fontWeight:600, color:'#fff', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
-              {title || '影片'}
-            </p>
-            <div style={{ display:'flex', gap:14, marginTop:5 }}>
-              {parseInt(duration) > 0 && <span style={{ fontSize:11, color:'rgba(255,255,255,0.45)' }}>⏱ {fmtDuration(parseInt(duration))}</span>}
-              {parseInt(fileSize) > 0 && <span style={{ fontSize:11, color:'rgba(255,255,255,0.45)' }}>💾 {fmtBytes(parseInt(fileSize))}</span>}
+        {/* ── 進度列（輕按出現，3 秒後自動收起）── */}
+        {showScrubber && (
+          <div style={{
+            position:'absolute', bottom: 0, left:0, right:0, zIndex:25,
+            background:'linear-gradient(to top, rgba(0,0,0,0.85) 0%, transparent 100%)',
+            paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 20px)',
+            padding:'40px 16px 20px',
+            animation:'fadeUp 0.2s ease',
+          }}>
+            {/* 時間軸 */}
+            <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:14 }}>
+              <span style={{ color:'rgba(255,255,255,0.8)', fontSize:12, minWidth:40, textAlign:'right', fontVariantNumeric:'tabular-nums' }}>
+                {fmtDuration(currentTime)}
+              </span>
+              <input
+                type="range"
+                className="scrubber-range"
+                min={0}
+                max={videoDuration || 100}
+                step={0.5}
+                value={currentTime}
+                onChange={(e) => {
+                  const t = parseFloat(e.target.value);
+                  const vid = videoRef.current;
+                  if (vid) vid.currentTime = t;
+                  setCurrentTime(t);
+                  showScrubberFor3s();
+                }}
+                onTouchStart={(e) => e.stopPropagation()}
+                onTouchMove={(e)  => e.stopPropagation()}
+                onTouchEnd={(e)   => e.stopPropagation()}
+              />
+              <span style={{ color:'rgba(255,255,255,0.8)', fontSize:12, minWidth:40, fontVariantNumeric:'tabular-nums' }}>
+                {fmtDuration(videoDuration)}
+              </span>
+            </div>
+
+            {/* 控制按鈕列 */}
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+              {/* 左：頻道 + 標題 */}
+              <div style={{ flex:1, minWidth:0, marginRight:12 }}>
+                {chatTitle && (
+                  <p style={{ fontSize:11, color:'#a78bfa', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', marginBottom:3 }}>
+                    {chatTitle}
+                  </p>
+                )}
+                <p style={{ fontSize:13, fontWeight:600, color:'#fff', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                  {title || '影片'}
+                </p>
+                <div style={{ display:'flex', gap:12, marginTop:4 }}>
+                  {parseInt(duration) > 0 && <span style={{ fontSize:10, color:'rgba(255,255,255,0.4)' }}>⏱ {fmtDuration(parseInt(duration))}</span>}
+                  {parseInt(fileSize) > 0 && <span style={{ fontSize:10, color:'rgba(255,255,255,0.4)' }}>💾 {fmtBytes(parseInt(fileSize))}</span>}
+                </div>
+              </div>
+
+              {/* 右：播放 / 暫停 + 最愛 + 下一支 */}
+              <div style={{ display:'flex', alignItems:'center', gap:16, flexShrink:0 }}>
+                {hasPrev && (
+                  <button onClick={() => { goPrev(); }} style={{ background:'none', border:'none', color:'rgba(255,255,255,0.6)', fontSize:22, cursor:'pointer', padding:4 }}>⏮</button>
+                )}
+                <button
+                  onClick={() => {
+                    const vid = videoRef.current;
+                    if (vid) { if (vid.paused) vid.play(); else vid.pause(); }
+                    showScrubberFor3s();
+                  }}
+                  style={{ background:'none', border:'none', color:'#fff', fontSize:32, cursor:'pointer', padding:4, lineHeight:1 }}
+                >
+                  {paused ? '▶' : '⏸'}
+                </button>
+                {hasNext && (
+                  <button onClick={() => { goNext(); }} style={{ background:'none', border:'none', color:'rgba(255,255,255,0.6)', fontSize:22, cursor:'pointer', padding:4 }}>⏭</button>
+                )}
+                <button
+                  onClick={() => {
+                    if (!videoId) return;
+                    const video = {
+                      id: videoId, chatId, msgId, accessHash, chatType,
+                      mimeType: mimeType||'video/mp4', accountId,
+                      title: title||'', chatTitle: chatTitle||'',
+                      date: parseInt(date)||0, duration: parseInt(duration)||0,
+                      fileSize: parseInt(fileSize)||0, hasThumbnail: hasThumbnail==='true',
+                    };
+                    const added = toggleFavorite(video);
+                    setFav(added);
+                    showToast(added ? '❤️ 已加入最愛' : '🤍 已從最愛移除');
+                    showScrubberFor3s();
+                  }}
+                  style={{ background:'none', border:'none', fontSize:26, cursor:'pointer', padding:4, lineHeight:1 }}
+                >{fav ? '❤️' : '🤍'}</button>
+              </div>
             </div>
           </div>
+        )}
 
-          {/* 右側按鈕群 */}
-          <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:14, flexShrink:0 }}>
-            {/* 最愛按鈕 */}
-            <button
-              onClick={() => {
-                if (!videoId) return;
-                const video = {
-                  id: videoId, chatId, msgId, accessHash, chatType,
-                  mimeType: mimeType||'video/mp4', accountId,
-                  title: title||'', chatTitle: chatTitle||'',
-                  date: parseInt(date)||0, duration: parseInt(duration)||0,
-                  fileSize: parseInt(fileSize)||0, hasThumbnail: hasThumbnail==='true',
-                };
-                const added = toggleFavorite(video);
-                setFav(added);
-                showToast(added ? '❤️ 已加入最愛' : '🤍 已從最愛移除');
-              }}
-              style={{ background:'none', border:'none', fontSize:30, cursor:'pointer', padding:4, lineHeight:1, transform: fav ? 'scale(1.2)':'scale(1)', transition:'transform 0.15s' }}
-            >{fav ? '❤️' : '🤍'}</button>
-
-            {/* 下一支按鈕（有下一支才顯示）*/}
-            {hasNext && (
-              <button onClick={goNext} style={{
-                background:'rgba(255,255,255,0.18)', border:'none',
-                borderRadius:20, color:'#fff', fontSize:11, fontWeight:700,
-                cursor:'pointer', padding:'5px 14px', fontFamily:'inherit',
-              }}>下一支 ↑</button>
-            )}
-
-            {/* 上一支按鈕（有上一支才顯示）*/}
-            {hasPrev && (
-              <button onClick={goPrev} style={{
-                background:'rgba(255,255,255,0.12)', border:'none',
-                borderRadius:20, color:'rgba(255,255,255,0.6)', fontSize:11, fontWeight:600,
-                cursor:'pointer', padding:'5px 14px', fontFamily:'inherit',
-              }}>↓ 上一支</button>
-            )}
+        {/* ── 底部列（scrubber 隱藏時顯示：最愛 + 切換）── */}
+        {!showScrubber && (
+          <div style={{
+            position:'absolute', bottom:0, left:0, right:0, zIndex:20,
+            background:'linear-gradient(to top, rgba(0,0,0,0.7) 0%, transparent 100%)',
+            paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 20px)',
+            padding:'32px 16px 20px',
+            display:'flex', alignItems:'flex-end', gap:14,
+            pointerEvents:'none',
+          }}>
+            <div style={{ flex:1 }}/>
+            <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:14, flexShrink:0, pointerEvents:'auto' }}>
+              <button
+                onClick={() => {
+                  if (!videoId) return;
+                  const video = {
+                    id: videoId, chatId, msgId, accessHash, chatType,
+                    mimeType: mimeType||'video/mp4', accountId,
+                    title: title||'', chatTitle: chatTitle||'',
+                    date: parseInt(date)||0, duration: parseInt(duration)||0,
+                    fileSize: parseInt(fileSize)||0, hasThumbnail: hasThumbnail==='true',
+                  };
+                  const added = toggleFavorite(video);
+                  setFav(added);
+                  showToast(added ? '❤️ 已加入最愛' : '🤍 已從最愛移除');
+                }}
+                style={{ background:'none', border:'none', fontSize:30, cursor:'pointer', padding:4, lineHeight:1 }}
+              >{fav ? '❤️' : '🤍'}</button>
+              {hasNext && (
+                <button onClick={goNext} style={{ background:'rgba(255,255,255,0.18)', border:'none', borderRadius:20, color:'#fff', fontSize:11, fontWeight:700, cursor:'pointer', padding:'5px 14px', fontFamily:'inherit' }}>下一支 ↑</button>
+              )}
+              {hasPrev && (
+                <button onClick={goPrev} style={{ background:'rgba(255,255,255,0.12)', border:'none', borderRadius:20, color:'rgba(255,255,255,0.6)', fontSize:11, fontWeight:600, cursor:'pointer', padding:'5px 14px', fontFamily:'inherit' }}>↓ 上一支</button>
+              )}
+            </div>
           </div>
-        </div>
+        )}
 
         {/* ── Toast ── */}
         {toast && (
           <div style={{
-            position:'absolute', bottom:110, left:'50%', transform:'translateX(-50%)',
+            position:'absolute', bottom:130, left:'50%', transform:'translateX(-50%)',
             background:'rgba(0,0,0,0.82)', border:'1px solid rgba(255,255,255,0.12)',
             color:'#f4f4f5', padding:'10px 22px', borderRadius:24,
             fontSize:13, zIndex:30, whiteSpace:'nowrap', pointerEvents:'none',
-            boxShadow:'0 4px 16px rgba(0,0,0,0.5)',
           }}>
             {toast}
           </div>
