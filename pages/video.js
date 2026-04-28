@@ -124,13 +124,20 @@ export default function VideoPage() {
     };
   }, []);
 
-  // ── autoPlay 備援：canplay 時強制 play()（避免 iOS 攔截）──────────────────
+  // ── 立即播放：不等 buffer，多點觸發確保在所有環境啟動 ──────────────────────
   useEffect(() => {
     const vid = videoRef.current;
     if (!vid || !streamUrl) return;
     const tryPlay = () => vid.play().catch(() => {});
-    vid.addEventListener('canplay', tryPlay, { once: true });
-    return () => vid.removeEventListener('canplay', tryPlay);
+    tryPlay();                                           // mount 後立即嘗試
+    vid.addEventListener('loadstart',    tryPlay, { once: true });
+    vid.addEventListener('loadeddata',   tryPlay, { once: true });
+    vid.addEventListener('canplay',      tryPlay, { once: true });
+    return () => {
+      vid.removeEventListener('loadstart',  tryPlay);
+      vid.removeEventListener('loadeddata', tryPlay);
+      vid.removeEventListener('canplay',    tryPlay);
+    };
   }, [streamUrl]);
 
   // ── playlist ───────────────────────────────────────────────────────────────
@@ -489,6 +496,8 @@ export default function VideoPage() {
             playsInline
             preload="auto"
             x-webkit-airplay="allow"
+            onCanPlay={() => videoRef.current?.play().catch(() => {})}
+            onLoadedData={() => videoRef.current?.play().catch(() => {})}
             onEnded={handleEnded}
             onPlay={()  => setPaused(false)}
             onPause={() => setPaused(true)}
